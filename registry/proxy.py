@@ -15,7 +15,8 @@ from urllib.parse import urlparse
 
 from registry import config, creds
 from registry.bb.kb import kb_proxy_ontology, kb_proxy_status, kb_proxy_upload
-from registry.bb.upload import bb_cleanup, bb_local_problem, bb_mcp_path, bb_proxy_status, bb_proxy_upload
+from registry.bb.kb import kb_startup
+from registry.bb.upload import bb_local_problem, bb_proxy_status, bb_proxy_upload, bb_startup
 from registry.util import NoRedirect, dumps
 
 HOP_HEADERS = {"host", "content-length", "connection", "keep-alive", "accept-encoding", "transfer-encoding",
@@ -117,12 +118,12 @@ def run_proxy(a):
     print(f"Прокси к реестру {target} слушает :{a.port}\n"
           f"В браузере: в адресе своего Jupyter замените всё после /jserver на /proxy/{a.port}/")
     bb = bb_local_problem()
-    print(f"Выгрузка карточек в BB: недоступна — {bb}" if bb else
-          f"Выгрузка карточек в BB: из этого контейнера — MCP-сервер {bb_mcp_path()}, Bitbucket {config.BB_BASE_URL}; "
-          "учётка BB — только в памяти прокси", flush=True)
+    print(f"Bitbucket: недоступен — {bb}" if bb else
+          f"Bitbucket: {config.BB_BASE_URL}, учётка BB — только в памяти прокси; "
+          f"клоны: выгрузка {config.BB_CLONE}, база знаний {config.KB_CLONE}", flush=True)
+    bb_startup(server)   # клоны при запуске: проверить/склонировать/обновить (best effort)
+    kb_startup(server)
     try:
         srv.serve_forever()
     except (KeyboardInterrupt, SystemExit):
         pass
-    finally:
-        bb_cleanup()

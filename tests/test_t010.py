@@ -1,16 +1,17 @@
-"""T-010: выгрузка карточек знаний в BB (Bitbucket) через MCP — из контейнера сотрудника.
+"""T-010: выгрузка карточек знаний в BB (Bitbucket) напрямую (git + REST, T-013) — из контейнера сотрудника.
 Критерии приёмки — docs/backlog.md (T-010); контракт — от тимлида, уточнения — от dev (константы ниже).
 
 Как устроено в тесте:
   сервер реестра — helpers.Server (json и sqlite) с REG_BB_* владельца; в BB не ходит, учётки BB не видит;
+      REG_BB_REPO_URL — путь к локальному bare-репозиторию (git ходит на локальные пути без учётки);
   прокси сотрудника — `app.py proxy 127.0.0.1:<порт> --port N --bb-creds-stdin` подпроцессом: логин и пароль BB —
-      двумя строками в stdin; свои REG_BB_MCP (фейковый server.py), REG_BB_MCP_PYTHON, REG_BB_BASE_URL, REG_BB_TIMEOUT;
-      TMPDIR и рабочая папка прокси — свои пустые папки (проверяем, что клон удалён и ничего не осталось);
-  MCP-сервер — tests/fake_bb_mcp.py (stdlib, JSON-RPC по stdio, как SDK mcp 2.3.0) поверх локального bare-репозитория;
-      журнал фейка — вызовы инструментов, sha256 учётки внутри процесса, исходные argv и окружение глазами ОС;
+      двумя строками в stdin; свои REG_BB_BASE_URL (адрес фейкового REST), REG_BB_CLONE (постоянный клон),
+      git-идентичность через GIT_AUTHOR_*/GIT_COMMITTER_*;
+  REST Bitbucket — tests/fake_bb_rest.py (stdlib): pull request с Basic-авторизацией, ветки проверяет в bare,
+      журнал запросов с хешем учётки;
   «злой» сервер реестра — FakeRegistry (http.server в тесте): проверки стороны сотрудника.
-Хост Bitbucket — выдуманный bb.example.test (настоящий Bitbucket не трогаем), хост коллеги — 127.0.0.1.
-Процессы — строго по PID. Все данные выдуманные (правило 3 CLAUDE.md)."""
+Хост Bitbucket — 127.0.0.1 (фейковый REST; настоящий Bitbucket не трогаем). Процессы — строго по PID.
+Все данные выдуманные (правило 3 CLAUDE.md)."""
 import ast
 import base64
 import ctypes
@@ -36,22 +37,19 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from helpers import APP, ROOT, Server, backend_text, clean_env, employee_side_files, free_port, frontend_css, frontend_text, teams_for# noqa: E402
+from helpers import APP, ROOT, Server, backend_text, clean_env, employee_side_files, free_port, frontend_css, frontend_text, teams_for  # noqa: E402
+from fake_bb_rest import FakeBitbucket  # noqa: E402
 
 # ---------------------------------------------------------------- контракт (правится только здесь)
 API_STATUS, API_TASK, API_DONE, API_UPLOAD = "/api/bb/status", "/api/bb/task", "/api/bb/done", "/api/bb/upload"
 CREDS_FLAG = "--bb-creds-stdin"
 SRV_KEYS = ("REG_BB_REPO_URL", "REG_BB_PROJECT", "REG_BB_REPO", "REG_BB_BRANCH", "REG_BB_DIR")
-EMP_KEYS = ("REG_BB_MCP", "REG_BB_MCP_PYTHON", "REG_BB_BASE_URL", "REG_BB_TIMEOUT")
+EMP_KEYS = ("REG_BB_BASE_URL", "REG_BB_TIMEOUT", "REG_BB_CLONE")
 DEF_BRANCH, DEF_DIR = "master", "KB"
 BUTTON = "Выгрузить карточки в BB"
 HIST_DONE = "Карточки выгружены в BB"
-TOOLS_ORDER = ["bitbucket_clone", "bitbucket_checkout", "bitbucket_checkout", "bitbucket_add", "bitbucket_status",
-               "bitbucket_commit", "bitbucket_push", "bitbucket_create_pull_request"]
-AFTER_STATUS = {"bitbucket_commit", "bitbucket_push", "bitbucket_create_pull_request"}
 NO_CHANGES = re.compile(r"без изменений|изменений нет", re.I)
 VIA_PROXY = re.compile(r"через (свой )?прокси", re.I)
-SDK_PREFIX = "Error executing tool"
 RU = "[А-Яа-яЁё]"
 APPROVED, WORK, DONE = "Согласована", "В работе", "Завершена"
 
@@ -80,14 +78,13 @@ CARDS = [  # первая — кириллица и знаки в вопросе
      "Выдуманный ответ: нажать кнопку «Выгрузить».\nВторая строка — «кавычки» & <теги>, 100% выдумка."),
     ("Plain question about the knowledge base", "Fictional answer, line one.\nLine two."),
 ]
-BB_BASE = "https://bb.example.test"
-REPO_URL = BB_BASE + "/scm/kbproj/kb-repo.git"
+BB_BASE = "https://bb.example.test"   # выдуманный хост для ссылок в /api/bb/done (синтакис http(s))
+REST_BASE = None   # адрес фейкового REST — определяется в каркасе (KbBase/BBBase)
 PROJECT, REPO = "KBPROJ", "kb-repo"
 BB_LOGIN = "t010-bb-login-" + secrets.token_hex(3)
 BB_PASS = "Vy#dum@n:Pa55%/" + secrets.token_hex(6)       # спецсимволы URL — для проверки маскировки
 BB_PASS_RU = "Пароль#Т010@" + secrets.token_hex(6)       # кириллица — канал stdin -> прокси -> лаунчер без потерь
-SRV_ENV = {"REG_BB_REPO_URL": REPO_URL, "REG_BB_PROJECT": PROJECT, "REG_BB_REPO": REPO}
-FAKE_SRC = Path(__file__).resolve().parent / "fake_bb_mcp.py"
+SRV_ENV = {"REG_BB_PROJECT": PROJECT, "REG_BB_REPO": REPO}   # URL добавляет каркас (путь к bare)
 
 HTML = frontend_text()
 APP_SRC = backend_text()
@@ -235,57 +232,6 @@ class BareRepo:
         self.bgit("update-ref", f"refs/heads/{into}", f"refs/heads/{branch}")
 
 
-# ---------------------------------------------------------------- фейковый MCP-сервер (server.py пользователя)
-class FakeMcp:
-    def __init__(self, work, bare):
-        self.dir = Path(work) / "mcp server"          # пробел в пути — путь уходит аргументом, не строкой оболочки
-        self.dir.mkdir()
-        self.server = self.dir / "server.py"
-        shutil.copy(FAKE_SRC, self.server)
-        (self.dir / "fake_bb_sibling.py").write_text("SIBLING = True\n", "utf-8")
-        self.journal = Path(work) / "mcp-journal.jsonl"
-        self.cfg = {"bare": str(bare.path), "journal": str(self.journal), "counter": str(Path(work) / "mcp-pr-counter"),
-                    "scan": [], "fail": "", "status": "porcelain", "git_env": bare.env}
-        self.write()
-
-    def write(self):
-        (self.dir / "fake_bb.json").write_text(json.dumps(self.cfg, ensure_ascii=False), "utf-8")
-
-    def set(self, **kw):
-        self.cfg.update(kw)
-        self.write()
-
-    def records(self):
-        if not self.journal.exists():
-            return []
-        out = []
-        for line in self.journal.read_text("utf-8").splitlines():
-            try:
-                out.append(json.loads(line))
-            except ValueError:
-                pass
-        return out
-
-    def mark(self):
-        return len(self.records())
-
-    def since(self, m, ev=None):
-        recs = self.records()[m:]
-        return [r for r in recs if ev is None or r["ev"] == ev]
-
-    def kill_leftovers(self):
-        """Остановить по PID оставшиеся процессы фейка (только наши: в командной строке — наша папка)."""
-        left = []
-        for r in self.records():
-            if r["ev"] == "start" and alive(r["pid"]) and str(self.dir) in ps_field(r["pid"], "command"):
-                left.append(r["pid"])
-                try:
-                    os.kill(r["pid"], signal.SIGKILL)
-                except OSError:
-                    pass
-        return left
-
-
 # ---------------------------------------------------------------- прокси сотрудника (app.py proxy)
 class Proxy:
     def __init__(self, target, work, token, env=None, creds=True, login=BB_LOGIN, password=BB_PASS, stdin_text=None,
@@ -417,7 +363,7 @@ class FakeRegistry:
         self.httpd.server_close()
 
 
-# ---------------------------------------------------------------- база: сервер + прокси + фейковый MCP + bare
+# ---------------------------------------------------------------- база: сервер + прокси + REST-фейк + bare
 class BBBase(unittest.TestCase):
     storage = "json"
     srv_env = SRV_ENV
@@ -434,10 +380,10 @@ class BBBase(unittest.TestCase):
         cls.s, cls.proxy, cls.extra_proxies = None, None, []
         try:
             cls.bare = BareRepo(cls.work, cls.branches)
-            cls.mcp = FakeMcp(cls.work, cls.bare)
+            cls.rest = FakeBitbucket(cls.work / "rest", {f"{PROJECT}/{REPO}": cls.bare.path},
+                                     cls.login, cls.password)
             cls.s = Server(cls.storage, args=ADMIN_ARGS, stdin_lines=[ADMIN_PIN], env=cls.server_env())
             cls.proxy = cls.start_proxy()
-            cls.mcp.set(scan=[str(cls.proxy.tmp)])
             cls.sid, cls.admin_name = cls.setup_people()
         except Exception:
             cls.tearDownClass()
@@ -450,18 +396,19 @@ class BBBase(unittest.TestCase):
                 p.stop()
         if getattr(cls, "s", None) is not None:
             cls.s.stop()
-        if getattr(cls, "mcp", None) is not None:
-            cls.mcp.kill_leftovers()
+        if getattr(cls, "rest", None) is not None:
+            cls.rest.stop()
         cls._work.cleanup()
 
     @classmethod
     def server_env(cls):
-        return cls.srv_env
+        return {"REG_BB_REPO_URL": str(cls.bare.path), **cls.srv_env}   # локальный bare; srv_env может переопределить
 
     @classmethod
     def proxy_settings(cls, **extra):
-        return {"REG_BB_MCP": str(cls.mcp.server), "REG_BB_MCP_PYTHON": sys.executable, "REG_BB_BASE_URL": BB_BASE,
-                "REG_BB_TIMEOUT": cls.timeout, **cls.proxy_env, **extra}
+        return {"REG_BB_BASE_URL": cls.rest.base, "REG_BB_TIMEOUT": cls.timeout,
+                "REG_BB_CLONE": str(cls.work / "bb-clone"), **git_env(cls.work),
+                **cls.proxy_env, **extra}
 
     @classmethod
     def start_proxy(cls, target=None, env=None, extra=True, **kw):
@@ -550,7 +497,7 @@ class BBBase(unittest.TestCase):
 
     def admin_server(self, env=None):
         """Ещё один сервер без людей: админ ставит задачу сразу в «Согласована» (bz_save = да) и добавляет карточку."""
-        srv = Server("json", args=ADMIN_ARGS, stdin_lines=[ADMIN_PIN], env=env)
+        srv = Server("json", args=ADMIN_ARGS, stdin_lines=[ADMIN_PIN], env=env or self.server_env())
         self.addCleanup(srv.stop)
         code, a = srv.call("POST", "/api/login", {"admin": True, "pin": ADMIN_PIN})
         self.assertEqual(code, 200, a)
@@ -581,14 +528,13 @@ class BBBase(unittest.TestCase):
         return r
 
     def refused_upload(self, t, codes, who=EXE, proxy=None, body=None):
-        """Отказ: нужный код, текст по-русски, MCP-сервер не запускался, задача не изменилась, во временной папке пусто."""
-        before, m = self.snap(self.get(t)), self.mcp.mark()
+        """Отказ: нужный код, текст по-русски, в Bitbucket не ходили (REST-журнал пуст), задача не изменилась."""
+        before, m = self.snap(self.get(t)), self.rest.mark()
         code, r = self.upload(t, who, proxy, body=body)
         self.assertIn(code, codes, r)
         self.assertRegex(r.get("error", ""), RU, r)
-        self.assertEqual(self.mcp.since(m, "start"), [], "MCP-сервер запускался, хотя выгрузка отклонена")
+        self.assertEqual(self.rest.since(m), [], "REST Bitbucket получил запрос, хотя выгрузка отклонена")
         self.assertEqual(self.snap(self.get(t)), before, "при отказе в задаче ничего не должно меняться")
-        self.assert_tmp_clean(proxy or self.proxy)
         return r
 
     def no_secrets(self, text, where):
@@ -601,19 +547,9 @@ class BBBase(unittest.TestCase):
             for f in secret_forms(v):
                 self.assertNotIn(f.encode("utf-8"), data, f"учётка BB в {where}")
 
-    def assert_tmp_clean(self, proxy=None):
-        """Во временной папке прокси — ни клона, ни файлов; в рабочей папке прокси — пусто."""
-        p = proxy or self.proxy
-        self.assertEqual([str(x) for x in p.tmp.rglob("*") if x.is_file() or x.name == ".git"], [],
-                         "во временной папке прокси что-то осталось (клон не удалён?)")
-        self.assertEqual(list(p.cwd.iterdir()), [], "прокси что-то записал в свою рабочую папку")
-
-    def assert_mcp_finished(self, recs):
-        """После выгрузки: процесс MCP-сервера остановлен, клон удалён."""
-        for st in [r for r in recs if r["ev"] == "start"]:
-            self.assertTrue(wait_dead(st["pid"], 10), f"MCP-сервер pid {st['pid']} не остановлен")
-        for c in [r for r in recs if r["ev"] == "call" and r["name"] == "bitbucket_clone"]:
-            self.assertFalse(os.path.exists(c["args"].get("path", "")), "клон не удалён")
+    def assert_clone_kept(self):
+        """Постоянный клон живёт в REG_BB_CLONE между выгрузками (кэш, не удаляется)."""
+        self.assertTrue((Path(self.work) / "bb-clone" / ".git").is_dir(), "постоянный клон не создан")
 
     @staticmethod
     def next_second():
@@ -626,7 +562,7 @@ class UploadFlowTest(BBBase):
     """Хранилище json; целевая ветка и папка — по умолчанию (master, KB)."""
 
     def test_status_via_proxy_available(self):
-        """Кр. 2, 6: прокси с учёткой и MCP-сервером, сервер настроен — выгрузка доступна, ответ — от прокси."""
+        """Кр. 2, 6: прокси с учёткой, сервер настроен — выгрузка доступна, ответ — от прокси."""
         code, r = self.proxy.call("GET", API_STATUS, session=self.sid[EXE])
         self.assertEqual(code, 200, r)
         self.assertIs(r.get("available"), True, r)
@@ -634,30 +570,22 @@ class UploadFlowTest(BBBase):
         self.no_secrets(self.proxy.responses[-1], "/api/bb/status")
 
     def test_upload_creates_branch_files_and_pr(self):
-        """Кр. 1, 2: новая ветка kb/once-<id>-<время> с карточками в KB/, pull request в целевую ветку,
-        инструменты MCP — по порядку контракта, ссылка на PR — в задаче (bb, история, bz_card)."""
+        """Кр. 1, 2: новая ветка kb/once-<id>-<время> с карточками в KB/, pull request в целевую ветку
+        через REST (Basic-учётка, правильные проект/ветки), ссылка на PR — в задаче (bb, история, bz_card)."""
         t, cards = self.task_in()
-        m = self.mcp.mark()
+        m = self.rest.mark()
         r = self.ok_upload(t)
-        recs = self.mcp.since(m)
-        starts = [x for x in recs if x["ev"] == "start"]
-        self.assertEqual(len(starts), 1, "один запуск MCP-сервера на выгрузку")
-        calls = [x for x in recs if x["ev"] == "call"]
-        self.assertEqual([c["name"] for c in calls], TOOLS_ORDER)
-        clone, co_target, co_new, add, _status, _commit, push, pr = calls
+        recs = self.rest.since(m)
+        self.assertEqual(len(recs), 1, "один REST-запрос pull request на выгрузку")
         br = r["branch"]
         self.assertRegex(br, rf"^kb/once-{t['id']}-\d{{8}}-\d{{6}}$")
-        self.assertEqual(clone["args"].get("url"), REPO_URL)
-        self.assertEqual(co_target["args"].get("branch"), self.target_branch)
-        self.assertFalse(co_target["args"].get("create"))
-        self.assertEqual(co_new["args"].get("branch"), br)
-        self.assertTrue(co_new["args"].get("create"))
-        self.assertEqual(push["args"].get("branch"), br)
-        self.assertEqual(push["args"].get("remote", "origin"), "origin")
-        pa = pr["args"]
-        self.assertEqual((pa.get("project"), pa.get("repo"), pa.get("source_branch"), pa.get("target_branch")),
-                         (PROJECT, REPO, br, self.target_branch))
-        self.assertTrue((pa.get("title") or "").strip(), "у pull request нет заголовка")
+        pr = recs[0]["payload"]
+        self.assertEqual((pr["fromRef"]["id"], pr["toRef"]["id"]),
+                         (f"refs/heads/{br}", f"refs/heads/{self.target_branch}"))
+        self.assertTrue((pr.get("title") or "").strip(), "у pull request нет заголовка")
+        self.assertTrue(recs[0]["auth_ok"], "REST получил не ту учётку")
+        self.assertIn("/rest/api/1.0/projects/", recs[0]["path"])
+        self.assertIn(f"/repos/{REPO}/", recs[0]["path"])
         # репозиторий: ветка, файлы карточек только в папке БЗ, содержимое — в формате реестра
         want = self.expected(cards)
         self.assertIn(br, self.bare.branches())
@@ -666,9 +594,9 @@ class UploadFlowTest(BBBase):
             self.assertEqual(self.bare.show(br, path), content, path)
         self.assertEqual(self.bare.show(br, f"{DEF_DIR}/Чужая карточка.md"),
                          "# Чужой вопрос?\n\nЧужой выдуманный ответ\n", "чужая карточка в BB изменилась")
-        self.assertEqual(sorted(add["args"].get("paths") or []), sorted(want))
+        self.assert_clone_kept()
         # ответ браузеру
-        self.assertTrue(r["pr_url"].startswith(BB_BASE + "/"), r)
+        self.assertTrue(r["pr_url"].startswith(self.rest.base + "/"), r)
         self.assertTrue(r["pr_url"].endswith(f"/pull-requests/{r['pr_id']}"), r)
         self.assertEqual(sorted(Path(f).name for f in r["files"]), sorted(Path(f).name for f in want))
         # задача на сервере
@@ -686,9 +614,6 @@ class UploadFlowTest(BBBase):
         self.assertIn(str(r["pr_id"]), h["action"])
         self.assertEqual(h["by"], EXE)
         self.assertEqual(r["task"].get("_v"), after["_v"], "в ответе — задача как сохранена")
-        # процессы и временные файлы
-        self.assert_mcp_finished(recs)
-        self.assert_tmp_clean()
         self.assertFalse((ROOT / DEF_DIR).exists(), "файлы карточек записаны в папку проекта")
 
     def test_repeat_upload_new_branch_and_pr(self):
@@ -713,17 +638,12 @@ class UploadFlowTest(BBBase):
         r1 = self.ok_upload(t)
         self.bare.merge(r1["branch"], self.target_branch)
         self.next_second()
-        before, m = self.snap(self.get(t)), self.mcp.mark()
+        before, m = self.snap(self.get(t)), self.rest.mark()
         code, r = self.upload(t)
         self.assertEqual(code, 400, r)
         self.assertRegex(r.get("error", ""), NO_CHANGES)
-        recs = self.mcp.since(m)
-        names = [c["name"] for c in recs if c["ev"] == "call"]
-        self.assertIn("bitbucket_status", names)
-        self.assertEqual(set(names) & AFTER_STATUS, set(), names)
+        self.assertEqual(self.rest.since(m), [], "«без изменений» — pull request не создаётся")
         self.assertEqual(self.snap(self.get(t)), before, "«без изменений» — в задаче ничего не пишется")
-        self.assert_mcp_finished(recs)
-        self.assert_tmp_clean()
         edited = self.add_card(EXE, t, cards[0]["title"], "Исправленный выдуманный ответ.", path=cards[0]["path"])
         self.assertEqual(edited["path"], cards[0]["path"])
         self.next_second()
@@ -775,42 +695,21 @@ class UploadFlowTest(BBBase):
         self.assertEqual(t.get("bb") or [], [], "у нового цикла не должно быть чужих выгрузок")
         self.assertEqual([e["pr_url"] for e in t["cycles"][-1].get("bb") or []], [r["pr_url"]])
 
-    def test_credentials_reach_mcp_only_in_memory(self):
-        """Кр. 3: учётка — внутри процесса MCP-сервера (os.environ после лаунчера), но не в его исходном окружении
-        и не в аргументах (как их видит ОС: /proc/<pid>/environ, cmdline); BITBUCKET_BASE_URL — из REG_BB_BASE_URL;
-        временных файлов с паролем нет ни при старте, ни во время вызовов."""
+    def test_credentials_reach_rest_only_in_memory(self):
+        """Кр. 3: REST получил правильную учётку (Basic) — и она нигде больше: ни в аргументах/окружении
+        процессов, ни в файлах (askpass-помощник без секретов, канал — в памяти)."""
         t, _ = self.task_in(cards=CARDS[:1])
-        m = self.mcp.mark()
+        m = self.rest.mark()
         self.ok_upload(t)
-        recs = self.mcp.since(m)
-        st = next(x for x in recs if x["ev"] == "start")
-        self.assertEqual(st["user_sha"], sha(self.login), "логин BB не дошёл до MCP-сервера (лаунчер)")
-        self.assertEqual(st["pass_sha"], sha(self.password), "пароль BB не дошёл до MCP-сервера (или искажён)")
-        self.assertEqual(st["base_url"], BB_BASE)
-        if st["raw_kind"] is None:
-            self.skipTest("исходное окружение процесса недоступно на этой ОС — проверить на DataLab (/proc/<pid>/environ)")
-        self.no_secret_bytes(base64.b64decode(st["raw_env_b64"]), "исходном окружении MCP-сервера")
-        self.no_secret_bytes(base64.b64decode(st["raw_argv_b64"]), "аргументах MCP-сервера")
-        for x in recs:
-            self.assertEqual(x.get("leaks") or [], [], f"временный файл с паролем: {x}")
-
-    def test_launch_command_and_folder(self):
-        """Контракт запуска: [REG_BB_MCP_PYTHON, "-c", <лаунчер>, "<fd>", "<server.py>"]; server.py — как __main__,
-        в своей папке (cwd и sys.path[0] — папка server.py: соседние модули импортируются)."""
-        t, _ = self.task_in(cards=CARDS[:1])
-        m = self.mcp.mark()
-        self.ok_upload(t)
-        st = self.mcp.since(m, "start")[0]
-        self.assertEqual(st["name"], "__main__")
-        self.assertEqual(Path(st["cwd"]).resolve(), self.mcp.dir.resolve())
-        self.assertTrue(st["sibling"], "соседний модуль server.py не импортируется — нет его папки в sys.path")
-        if st["raw_argv"] is None:
-            self.skipTest("исходные argv недоступны на этой ОС")
-        argv = st["raw_argv"]
-        self.assertGreaterEqual(len(argv), 5, argv)
-        self.assertEqual(argv[1], "-c", argv)
-        self.assertTrue(argv[3].isdigit(), argv)
-        self.assertEqual(Path(argv[4]).resolve(), self.mcp.server.resolve())
+        recs = self.rest.since(m)
+        self.assertEqual(len(recs), 1)
+        self.assertTrue(recs[0]["auth_ok"], "REST-запрос не с той учёткой")
+        self.no_secret_bytes(json.dumps(recs[0]).encode("utf-8"), "журнале REST-фейка")
+        raw = proc_raw(self.proxy.proc.pid)
+        if raw is not None:
+            self.no_secret_bytes(raw, "аргументах/окружении прокси")
+        self.assertEqual(files_with([self.work, self.proxy.tmp, self.proxy.cwd], [self.password]), [],
+                         "файлы с паролем BB")
 
     def test_proxy_process_has_no_credentials(self):
         """Кр. 3: учётки нет в аргументах и исходном окружении процесса прокси (только stdin)."""
@@ -825,20 +724,20 @@ class UploadFlowTest(BBBase):
         в журнале прокси и в его временных файлах — тоже нет."""
         t, _ = self.task_in(cards=CARDS[:1])
         self.ok_upload(t)
-        self.mcp.set(fail="fail:bitbucket_push")
+        self.rest.set_fail("500")
         try:
             self.next_second()
             code, r = self.upload(t)
             self.assertEqual(code, 400, r)
         finally:
-            self.mcp.set(fail="")
+            self.rest.set_fail("")
         self.no_secrets(self.s.output(), "журнале сервера")
         for path, data in ((p, p.read_bytes()) for p in self.s.dir.rglob("*") if p.is_file()):
             self.no_secret_bytes(data, f"файле сервера {path.name}")
         self.no_secrets(json.dumps(self.s.call("GET", "/api/state")[1], ensure_ascii=False), "/api/state")
         self.no_secrets(self.proxy.output(), "журнале прокси")
-        self.assertEqual(files_with([self.work], [self.password]), [], "файлы с паролем BB")
-        self.assert_tmp_clean()
+        self.assertEqual(files_with([self.work, self.proxy.tmp, self.proxy.cwd], [self.password]), [],
+                         "файлы с паролем BB")
 
 
 class SqliteUploadFlowTest(UploadFlowTest):
@@ -862,7 +761,8 @@ class RightsTest(BBBase):
         got = {c["file"]: (c["title"], c["body"]) for c in r["cards"]}
         for c in cards:
             self.assertEqual(got[Path(c["path"]).name], (c["title"].strip(), c["body"].strip()))
-        want = {"repo_url": REPO_URL, "project": PROJECT, "repo": REPO, "branch": DEF_BRANCH, "dir": DEF_DIR}
+        want = {"repo_url": str(self.bare.path), "project": PROJECT, "repo": REPO,
+                "branch": DEF_BRANCH, "dir": DEF_DIR}
         self.assertEqual({k: r["target"].get(k) for k in want}, want)
         self.no_secrets(json.dumps(r, ensure_ascii=False), "/api/bb/task")
 
@@ -907,14 +807,14 @@ class RightsTest(BBBase):
         self.refused_upload(t, (401,), who=None)
 
     def test_upload_not_executor_403(self):
-        """Посторонний сотрудник, тимлид задачи (не исполнитель), чужой тимлид — 403, MCP-сервер не запускается."""
+        """Посторонний сотрудник, тимлид задачи (не исполнитель), чужой тимлид — 403, в BB не ходили."""
         t, _ = self.task_in(cards=CARDS[:1])
         for who in (OUT, LEAD, LEAD2):
             with self.subTest(who=who):
                 self.refused_upload(t, (403,), who=who)
 
     def test_upload_not_approved(self):
-        """Не «Согласована» («В работе» с карточкой админа, «Завершена») — 403/400, MCP-сервер не запускается."""
+        """Не «Согласована» («В работе» с карточкой админа, «Завершена») — 403/400, в BB не ходили."""
         t, _ = self.task_in(status=WORK)
         self.add_card("admin", t, "Карточка админа в работе?", "Выдуманный ответ админа")
         self.refused_upload(t, (400, 403))
@@ -931,11 +831,11 @@ class RightsTest(BBBase):
         t, _ = self.task_in(cards=CARDS[:1])
         for body in ({"kind": "once", "id": 99999}, {"kind": "evil", "id": t["id"]}, {"kind": "once", "id": "1/../2"}):
             with self.subTest(body=body):
-                m = self.mcp.mark()
+                m = self.rest.mark()
                 code, r = self.upload(t, body=body)
                 self.assertIn(code, (400, 403, 404), r)
                 self.assertRegex(r.get("error", ""), RU)
-                self.assertEqual(self.mcp.since(m, "start"), [])
+                self.assertEqual(self.rest.since(m), [])
 
     # ---- POST /api/bb/done напрямую на сервер
     def done(self, t, who=EXE, **over):
@@ -1021,12 +921,7 @@ class RightsTest(BBBase):
 # ================================================================ критерии 2, 6: не настроено — недоступно с пояснением
 class NotConfiguredTest(BBBase):
     """Сервер владельца — с настройками репозитория и, как у владельца-исполнителя, с настройками сотрудника
-    (REG_BB_MCP и др.) в своём окружении: выгружать сам он всё равно не должен. Ещё серверы — без REG_BB_*."""
-
-    @classmethod
-    def server_env(cls):
-        return {**SRV_ENV, "REG_BB_MCP": str(cls.mcp.server), "REG_BB_MCP_PYTHON": sys.executable,
-                "REG_BB_BASE_URL": BB_BASE}
+    в своём окружении: выгружать сам он всё равно не должен. Ещё серверы — без REG_BB_*."""
 
     def own_proxy(self, **kw):
         p = self.start_proxy(**kw)
@@ -1034,7 +929,7 @@ class NotConfiguredTest(BBBase):
         return p
 
     def own_server(self, env=None):
-        return self.admin_server(env)
+        return self.admin_server(env or SRV_ENV)   # по умолчанию — без REG_BB_REPO_URL: «не настроено»
 
     def test_direct_server_status(self):
         """Кр. 2: сервер напрямую — выгрузки нет (available false), но видно, что репозиторий настроен."""
@@ -1045,21 +940,20 @@ class NotConfiguredTest(BBBase):
         self.assertRegex(r.get("reason", ""), RU)
 
     def test_direct_server_upload_refused(self):
-        """Кр. 2: POST /api/bb/upload на сервер владельца — 400 «через свой прокси», MCP-сервер не запускается,
-        хотя у владельца в окружении есть REG_BB_MCP (сам он выгружает — через свой прокси)."""
+        """Кр. 2: POST /api/bb/upload на сервер владельца — 400 «через свой прокси» (сервер в BB не ходит)."""
         t, _ = self.task_in(cards=CARDS[:1])
-        before, m = self.snap(self.get(t)), self.mcp.mark()
+        before, m = self.snap(self.get(t)), self.rest.mark()
         for who in (EXE, "admin"):
             with self.subTest(who=who):
                 code, r = self.s.call("POST", API_UPLOAD, {"kind": t["kind"], "id": t["id"]}, session=self.sid[who])
                 self.assertEqual(code, 400, r)
                 self.assertRegex(r.get("error", ""), VIA_PROXY)
-        self.assertEqual(self.mcp.since(m, "start"), [])
+        self.assertEqual(self.rest.since(m), [])
         self.assertEqual(self.snap(self.get(t)), before)
 
     def test_server_without_settings(self):
         """Кр. 6: у владельца нет REG_BB_* — сервер: server_configured false, /api/bb/task — 400; прокси сотрудника
-        с учёткой и MCP: недоступно с пояснением про настройки владельца, выгрузка — 400, MCP не запускается."""
+        с учёткой: недоступно с пояснением про настройки владельца, выгрузка — 400, в BB не ходили."""
         srv, adm, t = self.own_server()
         code, r = srv.call("GET", API_STATUS, session=adm)
         self.assertEqual(code, 200, r)
@@ -1075,16 +969,15 @@ class NotConfiguredTest(BBBase):
         self.assertEqual(code, 200, r)
         self.assertIs(r.get("available"), False, r)
         self.assertRegex(r.get("reason", ""), r"REG_BB_REPO_URL|владел")
-        m = self.mcp.mark()
+        m = self.rest.mark()
         code, r = p.call("POST", API_UPLOAD, {"kind": "once", "id": t["id"]}, session=adm)
         self.assertEqual(code, 400, r)
         self.assertRegex(r.get("error", ""), RU)
-        self.assertEqual(self.mcp.since(m, "start"), [])
-        self.assert_tmp_clean(p)
+        self.assertEqual(self.rest.since(m), [])
 
     def test_server_partial_settings(self):
         """Нет части настроек владельца — server_configured false, в причине — чего не хватает."""
-        srv, adm, _ = self.own_server(env={"REG_BB_REPO_URL": REPO_URL})
+        srv, adm, _ = self.own_server(env={"REG_BB_REPO_URL": str(self.bare.path)})
         code, r = srv.call("GET", API_STATUS, session=adm)
         self.assertEqual(code, 200, r)
         self.assertIs(r.get("server_configured"), False, r)
@@ -1109,12 +1002,14 @@ class NotConfiguredTest(BBBase):
         """Прокси старым способом (без --bb-creds-stdin) — работает как прокси, выгрузка выключена с причиной."""
         self.check_unavailable(self.own_proxy(creds=False), r"connect\.sh")
 
-    def test_no_mcp_setting(self):
-        """Кр. 6: нет REG_BB_MCP у сотрудника — недоступно, в причине — REG_BB_MCP."""
-        self.check_unavailable(self.own_proxy(env={"REG_BB_MCP": None}), r"REG_BB_MCP")
+    def test_no_git_in_path(self):
+        """Кр. 6: в контейнере сотрудника нет git — недоступно с причиной про git."""
+        p = self.own_proxy(env={"PATH": str(self.work / "empty-bin")})
+        (self.work / "empty-bin").mkdir(exist_ok=True)
+        self.check_unavailable(p, r"git")
 
     def test_base_url_with_login_or_invalid(self):
-        """Кр. 3, 4: REG_BB_BASE_URL с логином или не адрес http(s) — недоступно с причиной, MCP не запускается."""
+        """Кр. 3, 4: REG_BB_BASE_URL с логином или не адрес http(s) — недоступно с причиной."""
         for base in ("https://someone@bb.example.test", "https://someone:secret@bb.example.test", "bb.example.test",
                      "ftp://bb.example.test"):
             with self.subTest(base=base):
@@ -1122,122 +1017,114 @@ class NotConfiguredTest(BBBase):
                 self.check_unavailable(p, r"REG_BB_BASE_URL")
                 self.assertNotIn("secret", p.output())
 
-    def test_mcp_path_missing(self):
-        """Кр. 6: REG_BB_MCP указывает в никуда — понятная 400 по-русски (статус — недоступно или ошибка при запуске)."""
-        p = self.own_proxy(env={"REG_BB_MCP": str(self.work / "нет такого" / "server.py")})
-        t, _ = self.task_in(cards=CARDS[:1])
-        before = self.snap(self.get(t))
-        code, r = self.upload(t, proxy=p)
-        self.assertEqual(code, 400, r)
-        self.assertRegex(r.get("error", ""), RU)
-        self.assertNotIn("Traceback", r.get("error", ""))
-        self.assertEqual(self.snap(self.get(t)), before)
-        self.assert_tmp_clean(p)
-
-    def test_mcp_python_missing(self):
-        """Кр. 6: REG_BB_MCP_PYTHON не существует — понятная 400 по-русски, задача не меняется."""
-        p = self.own_proxy(env={"REG_BB_MCP_PYTHON": str(self.work / "нет-python")})
-        t, _ = self.task_in(cards=CARDS[:1])
-        before = self.snap(self.get(t))
-        code, r = self.upload(t, proxy=p)
-        self.assertEqual(code, 400, r)
-        self.assertRegex(r.get("error", ""), RU)
-        self.assertEqual(self.snap(self.get(t)), before)
-        self.assert_tmp_clean(p)
-
     def test_settings_from_registry_env_creds_not(self):
         """Кр. 3, 7: настройки сотрудника — из registry.env (несекретные); BITBUCKET_USERNAME/PASSWORD в файле
         игнорируются — учётка только из stdin."""
         env_file = self.work / "registry-employee.env"
         file_pass = "Fake-file-password-" + secrets.token_hex(4)
-        env_file.write_text("\n".join([f"REG_BB_MCP={self.mcp.server}", f"REG_BB_MCP_PYTHON={sys.executable}",
-                                       f"REG_BB_BASE_URL={BB_BASE}", "REG_BB_TIMEOUT=60",
+        env_file.write_text("\n".join([f"REG_BB_BASE_URL={self.rest.base}", "REG_BB_TIMEOUT=60",
+                                       f"REG_BB_CLONE={self.work / 'bb-clone-env'}",
                                        "BITBUCKET_USERNAME=file-login", f"BITBUCKET_PASSWORD={file_pass}"]) + "\n",
                             "utf-8")
-        p = self.own_proxy(env={"REG_ENV_FILE": str(env_file), **{k: None for k in EMP_KEYS}}, extra=False)
+        p = self.own_proxy(env={"REG_ENV_FILE": str(env_file), **{k: None for k in EMP_KEYS},
+                                **git_env(self.work)}, extra=False)
         code, r = p.call("GET", API_STATUS, session=self.sid[EXE])
         self.assertEqual(code, 200, r)
         self.assertIs(r.get("available"), True, r)
         t, _ = self.task_in(cards=CARDS[:1])
-        m = self.mcp.mark()
+        m = self.rest.mark()
         self.ok_upload(t, proxy=p)
-        st = self.mcp.since(m, "start")[0]
-        self.assertEqual(st["pass_sha"], sha(self.password), "пароль BB — только из stdin, не из registry.env")
-        p2 = self.own_proxy(env={"REG_ENV_FILE": str(env_file), **{k: None for k in EMP_KEYS}}, extra=False,
-                            stdin_text="\n\n")
+        recs = self.rest.since(m)
+        self.assertEqual(len(recs), 1)
+        self.assertTrue(recs[0]["auth_ok"], "пароль BB — только из stdin, не из registry.env")
+        p2 = self.own_proxy(env={"REG_ENV_FILE": str(env_file), **{k: None for k in EMP_KEYS},
+                                 **git_env(self.work)}, extra=False, stdin_text="\n\n")
         code, r = p2.call("GET", API_STATUS, session=self.sid[EXE])
         self.assertIs(r.get("available"), False, "учётка BB из registry.env подхватилась")
         self.assertNotIn(file_pass, p.output() + p2.output())
 
 
-# ================================================================ критерии 3, 6: ошибки MCP-сервера и BB
+# ================================================================ критерии 3, 6: ошибки Bitbucket (REST/git)
 class ErrorsTest(BBBase):
     timeout = "4"   # REG_BB_TIMEOUT прокси — для зависаний
 
     def tearDown(self):
-        self.mcp.set(fail="")
+        self.rest.set_fail("")
 
     def failed_upload(self, mode, step_re=None):
-        """Отказ MCP/BB: 400 по-русски с шагом, без учётки и без английского префикса SDK; после упавшего
-        инструмента другие не вызываются; в задаче ничего; процесс MCP остановлен, клон удалён; журнал прокси чист."""
+        """Отказ BB (REST-режим фейка): 400 по-русски с шагом, без учётки; в задаче ничего; журнал прокси чист."""
         t, _ = self.task_in(cards=CARDS[:1])
-        self.mcp.set(fail=mode)
-        before, m = self.snap(self.get(t)), self.mcp.mark()
+        self.rest.set_fail(mode)
+        before = self.snap(self.get(t))
         t0 = time.time()
         code, r = self.upload(t)
         took = time.time() - t0
-        self.mcp.set(fail="")
+        self.rest.set_fail("")
         self.assertEqual(code, 400, r)
         err = r.get("error", "")
         self.assertRegex(err, RU)
-        self.assertNotIn(SDK_PREFIX, err)
         if step_re:
             self.assertRegex(err, step_re)
         self.assertEqual(self.snap(self.get(t)), before, "при ошибке в задачу ничего не пишется")
-        recs = self.mcp.since(m)
-        names = [x["name"] for x in recs if x["ev"] == "call"]
-        tool = mode.split(":", 1)[1] if ":" in mode else None
-        if tool and tool.startswith("bitbucket_"):
-            self.assertEqual(names[-1:], [tool], f"после отказа {tool} вызывались другие инструменты: {names}")
-        elif mode in ("start", "hang:initialize"):
-            self.assertEqual(names, [])
-        self.assert_mcp_finished(recs)
-        self.assert_tmp_clean()
         self.no_secrets(self.proxy.output(), "журнале прокси")
-        return r, recs, took
+        self.no_secrets(json.dumps(r, ensure_ascii=False), "ответе браузеру")
+        return r, took
 
-    def test_push_failure_masked(self):
-        """Кр. 6: отказ на push (в тексте git — логин и пароль) — «BB, шаг «push»: …», учётка замаскирована."""
-        r, recs, _ = self.failed_upload("fail:bitbucket_push", r"(?i)push")
-        self.assertRegex(r["error"], r"BB")
-        if "step" in r:
-            self.assertEqual(r["step"], "push")
-        self.assertIn("bitbucket_push", [x["name"] for x in recs if x["ev"] == "call"])
+    def test_rest_401_bad_credentials(self):
+        """Кр. 6: Bitbucket не принял учётку (401) — ошибка с подсказкой перезапустить connect.sh, без учётки."""
+        r, _ = self.failed_upload("401", r"(?i)pull request")
+        self.assertRegex(r["error"], r"не принял логин или пароль")
 
-    def test_push_failure_url_encoded_password_masked(self):
-        """Кр. 6: пароль в URL git (percent-encoding, quote(safe="")) — тоже не показывается."""
-        self.failed_upload("fail_quoted:bitbucket_push", r"(?i)push")
+    def test_rest_403_no_rights(self):
+        """Кр. 6: нет прав на репозиторий (403) — подсказка попросить доступ."""
+        r, _ = self.failed_upload("403", r"(?i)pull request")
+        self.assertRegex(r["error"], r"нет прав")
 
-    def test_push_failure_quote_default_password_masked(self):
-        """Кр. 6: пароль в URL, закодированный quote() по умолчанию («/» не кодируется — самый частый способ
-        вписать учётку в адрес в Python), — тоже не показывается ни в ответе, ни в журнале прокси."""
-        self.failed_upload("fail_quoted_slash:bitbucket_push", r"(?i)push")
+    def test_rest_404_repo_or_branch(self):
+        """Кр. 6: репозиторий или ветка не найдены (404) — подсказка про адрес и ветку."""
+        r, _ = self.failed_upload("404", r"(?i)pull request")
+        self.assertRegex(r["error"], r"не найден|ветк")
 
-    def test_proxy_stopped_mid_upload_cleans_up(self):
-        """Кр. 4: прокси останавливают (SIGTERM) посреди выгрузки — MCP-сервер остановлен, клон удалён, задача не тронута."""
+    def test_rest_500(self):
+        """Кр. 6: общий отказ REST (500) — понятная ошибка с кодом, без учётки."""
+        r, _ = self.failed_upload("500", r"(?i)pull request")
+        self.assertRegex(r["error"], r"HTTP 500")
+
+    def test_hang_timeout(self):
+        """Кр. 6: REST зависает при REG_BB_TIMEOUT=4 — ошибка по таймауту (с переклонированием и повтором — вдвое)."""
+        _, took = self.failed_upload("slow", r"(?i)pull request|таймаут|Timeout")
+        self.assertLess(took, 2 * 4 + 15, "таймаут REG_BB_TIMEOUT не сработал")
+
+    def test_clone_failure(self):
+        """Кр. 6: адрес — существующая папка без git — ошибка шага «clone», в BB (REST) не ходили."""
+        empty = self.work / "not-a-repo"
+        empty.mkdir()
+        shutil.rmtree(self.work / "bb-clone", ignore_errors=True)   # общий клон указывает на другой bare
+        srv, adm, t = self.admin_server(env={**SRV_ENV, "REG_BB_REPO_URL": str(empty)})
+        p = self.start_proxy(target=f"127.0.0.1:{srv.port}")
+        self.addCleanup(p.stop)
+        p.token = srv.token
+        m = self.rest.mark()
+        code, r = p.call("POST", API_UPLOAD, {"kind": t["kind"], "id": t["id"]}, session=adm)
+        self.assertEqual(code, 400, r)
+        self.assertRegex(r.get("error", ""), r"(?i)clone|клонир")
+        self.assertEqual(self.rest.since(m), [], "при отказе клона в REST не ходили")
+        self.no_secrets(p.output(), "журнале прокси")
+
+    def test_proxy_stopped_mid_upload(self):
+        """Кр. 4: прокси останавливают (SIGTERM) посреди выгрузки — задача не тронута, учётки в журнале нет;
+        постоянный клон — кэш, может остаться (переклонируется при следующей попытке)."""
         p = self.start_proxy(env={"REG_BB_TIMEOUT": "120"})
-        self.mcp.set(scan=[str(self.proxy.tmp), str(p.tmp)])
         t, _ = self.task_in(cards=CARDS[:1])
         before = self.snap(self.get(t))
-        self.mcp.set(fail="hang:bitbucket_push")
-        m = self.mcp.mark()
+        self.rest.set_fail("slow")
         th = threading.Thread(target=lambda: p.call("POST", API_UPLOAD, {"kind": t["kind"], "id": t["id"]},
                                                     session=self.sid[EXE], timeout=60), daemon=True)
         th.start()
         end = time.time() + 15
-        while time.time() < end and not [x for x in self.mcp.since(m, "call") if x["name"] == "bitbucket_push"]:
+        while time.time() < end and not self.rest.records():
             time.sleep(0.05)
-        self.assertTrue([x for x in self.mcp.since(m, "call") if x["name"] == "bitbucket_push"], "выгрузка не дошла до push")
+        self.assertTrue(self.rest.records(), "выгрузка не дошла до REST-запроса")
         p.proc.terminate()
         try:
             p.proc.wait(20)
@@ -1246,113 +1133,20 @@ class ErrorsTest(BBBase):
             p.proc.wait(5)
             self.fail("прокси не остановился по SIGTERM за 20 с")
         th.join(10)
-        self.assert_mcp_finished(self.mcp.since(m))
-        self.assertEqual([str(x) for x in p.tmp.rglob("*") if x.is_file() or x.name == ".git"], [],
-                         "после остановки прокси клон остался во временной папке")
         self.assertEqual(self.snap(self.get(t)), before)
         self.no_secrets(p.output(), "журнале прокси")
-
-    def test_bad_pr_link_from_mcp(self):
-        """MCP-сервер вернул ссылку на PR не http(s) — в задачу ничего, ошибка с шагом «pull request»."""
-        t, _ = self.task_in(cards=CARDS[:1])
-        before = self.snap(self.get(t))
-        self.mcp.set(pr_url="javascript:alert(1)")
-        try:
-            code, r = self.upload(t)
-        finally:
-            self.mcp.set(pr_url="")
-        self.assertEqual(code, 400, r)
-        self.assertRegex(r.get("error", ""), r"(?i)pull request")
-        self.assertFalse(str(r.get("pr_url") or "").lower().startswith("javascript"), r)
-        self.assertEqual(self.snap(self.get(t)), before)
-        self.assert_tmp_clean()
-
-    def test_chatty_mcp_server(self):
-        """MCP-сервер шлёт уведомления и ping посреди вызовов, а в stdout — отладочную строку не-JSON:
-        выгрузка проходит, на ping клиент отвечает."""
-        t, _ = self.task_in(cards=CARDS[:1])
-        self.mcp.set(chatty=True)
-        m = self.mcp.mark()
-        try:
-            self.ok_upload(t)
-        finally:
-            self.mcp.set(chatty=False)
-        answers = [x for x in self.mcp.since(m, "client_response")]
-        self.assertTrue(answers, "клиент не ответил на ping сервера")
-        self.assertTrue(all(x.get("result") == {} and x.get("error") is None for x in answers), answers)
-
-    def test_clone_failure(self):
-        r, _, _ = self.failed_upload("fail:bitbucket_clone", r"(?i)clone")
-
-    def test_pr_failure(self):
-        """Ошибка создания PR (ветка уже запушена) — шаг «pull request», в задаче ничего."""
-        self.failed_upload("fail:bitbucket_create_pull_request", r"(?i)pull request")
-
-    def test_mcp_crash_on_start(self):
-        """Кр. 6: MCP-сервер падает при старте (исключение, в traceback — учётка) — понятная ошибка без учётки."""
-        r, _, _ = self.failed_upload("start", r"(?i)MCP|запуск")
-
-    def test_mcp_dies_midway(self):
-        """MCP-сервер умирает на commit (в stderr — пароль) — ошибка с шагом, учётки нет ни в ответе, ни в журнале."""
-        self.failed_upload("exit:bitbucket_commit", r"(?i)commit")
-
-    def test_hang_timeout(self):
-        """Кр. 6: зависание на push при REG_BB_TIMEOUT=4 — ошибка по таймауту, процесс MCP остановлен."""
-        _, _, took = self.failed_upload("hang:bitbucket_push")
-        self.assertLess(took, 4 + 15, "таймаут REG_BB_TIMEOUT не сработал")
-
-    def test_hang_on_initialize(self):
-        """Зависание на initialize — ошибка запуска по таймауту, процесс MCP остановлен."""
-        _, _, took = self.failed_upload("hang:initialize")
-        self.assertLess(took, 4 + 15)
-
-    def test_second_upload_while_first_runs_409(self):
-        """Вторая выгрузка, пока идёт первая, — 409 по-русски, второй MCP-сервер не запускается."""
-        t, _ = self.task_in(cards=CARDS[:1])
-        self.mcp.set(fail="hang:bitbucket_push")
-        m = self.mcp.mark()
-        res = {}
-        th = threading.Thread(target=lambda: res.setdefault("first", self.proxy.call(
-            "POST", API_UPLOAD, {"kind": t["kind"], "id": t["id"]}, session=self.sid[EXE])))
-        th.start()
-        try:
-            end = time.time() + 15
-            while time.time() < end and not [x for x in self.mcp.since(m, "call") if x["name"] == "bitbucket_push"]:
-                time.sleep(0.05)
-            self.assertTrue([x for x in self.mcp.since(m, "call") if x["name"] == "bitbucket_push"], "первая не дошла до push")
-            m2 = self.mcp.mark()
-            code, r = self.upload(t)
-            self.assertEqual(code, 409, r)
-            self.assertRegex(r.get("error", ""), RU)
-            self.assertEqual(self.mcp.since(m2, "start"), [])
-        finally:
-            th.join(60)
-            self.mcp.set(fail="")
-        self.assertEqual(res.get("first", (None,))[0], 400, res)
-        self.no_secrets(json.dumps(res, ensure_ascii=False), "ответе первой выгрузки")
-        self.assert_mcp_finished(self.mcp.since(m))
-        self.assert_tmp_clean()
-
-    def test_upload_works_after_errors(self):
-        """После отказов выгрузка снова работает (ничего не залипло)."""
-        t, _ = self.task_in(cards=CARDS[:1])
-        self.mcp.set(fail="fail:bitbucket_push")
-        self.assertEqual(self.upload(t)[0], 400)
-        self.mcp.set(fail="")
-        self.next_second()
-        self.ok_upload(t)
 
 
 # ================================================================ критерий 4: сторона сотрудника не доверяет серверу
 class ServerForeignRepoTest(BBBase):
     """Кр. 4 на настоящем сервере: у владельца REG_BB_REPO_URL с чужим хостом (или с логином) — прокси сотрудника
-    отказывает (400), MCP-сервер не запускается, в задаче ничего."""
+    отказывает (400), в BB не ходит, в задаче ничего."""
     srv_env = {**SRV_ENV, "REG_BB_REPO_URL": "https://evil.example.test/scm/kbproj/kb-repo.git"}
 
     def test_foreign_host(self):
         t, _ = self.task_in(cards=CARDS[:1])
         r = self.refused_upload(t, (400,))
-        self.assertRegex(r["error"], r"evil\.example\.test|REG_BB_BASE_URL|Bitbucket")
+        self.assertRegex(r["error"], r"evil\.example\.test|чужой хост|REG_BB_BASE_URL|Bitbucket")
 
     def test_login_in_repo_url(self):
         srv, adm, t = self.admin_server({**SRV_ENV, "REG_BB_REPO_URL": "https://someone@bb.example.test/scm/kbproj/kb-repo.git"})
@@ -1360,13 +1154,12 @@ class ServerForeignRepoTest(BBBase):
         self.addCleanup(p.stop)
         p.token = srv.token
         before = srv.call("GET", "/api/state")[1]["tasks"]
-        m = self.mcp.mark()
+        m = self.rest.mark()
         code, r = p.call("POST", API_UPLOAD, {"kind": "once", "id": t["id"]}, session=adm)
         self.assertEqual(code, 400, r)
         self.assertRegex(r.get("error", ""), RU)
-        self.assertEqual(self.mcp.since(m, "start"), [])
+        self.assertEqual(self.rest.since(m), [])
         self.assertEqual(srv.call("GET", "/api/state")[1]["tasks"], before)
-        self.assert_tmp_clean(p)
 
 
 class EvilBase(BBBase):
@@ -1379,7 +1172,6 @@ class EvilBase(BBBase):
             cls.reg = FakeRegistry()
             cls.evil = cls.start_proxy(target=f"127.0.0.1:{cls.reg.port}")
             cls.evil.token = FakeRegistry.TOKEN
-            cls.mcp.set(scan=[str(cls.proxy.tmp), str(cls.evil.tmp)])
         except Exception:
             cls.tearDownClass()
             raise
@@ -1391,7 +1183,8 @@ class EvilBase(BBBase):
         super().tearDownClass()
 
     def payload(self, **over):
-        target = {"repo_url": REPO_URL, "project": PROJECT, "repo": REPO, "branch": DEF_BRANCH, "dir": DEF_DIR}
+        target = {"repo_url": str(self.bare.path), "project": PROJECT, "repo": REPO,
+                  "branch": DEF_BRANCH, "dir": DEF_DIR}
         target.update(over.pop("target", {}))
         cards = over.pop("cards", [{"file": "7_Выдуманный вопрос.md", "title": "Выдуманный вопрос?", "body": "Ответ"}])
         return {"task": {"kind": "once", "id": 7, "title": "Выдуманная задача"}, "cards": cards, "target": target,
@@ -1402,7 +1195,7 @@ class EvilBase(BBBase):
         self.reg.task_code, self.reg.task_body = 200, payload
         if fresh:
             self.next_second()
-        n, m = len(self.reg.reqs), self.mcp.mark()
+        n, m = len(self.reg.reqs), self.rest.mark()
         code, r = self.evil.call("POST", API_UPLOAD, {"kind": "once", "id": 7}, session="fake-session-t010")
         return code, r, n, m
 
@@ -1410,9 +1203,8 @@ class EvilBase(BBBase):
         code, r, n, m = self.evil_upload(payload)
         self.assertEqual(code, 400, r)
         self.assertRegex(r.get("error", ""), RU)
-        self.assertEqual(self.mcp.since(m, "start"), [], "MCP-сервер запустился с недопустимыми настройками")
+        self.assertEqual(self.rest.since(m), [], "в BB ходили с недопустимыми настройками")
         self.assertEqual(self.reg.done_reqs(n), [], "в задачу записано")
-        self.assert_tmp_clean(self.evil)
         self.assertEqual([p for p in self.work.rglob("escape-t010*")], [], "файл записан вне клона")
         return r
 
@@ -1458,7 +1250,7 @@ class EmployeeSideChecksTest(EvilBase):
         self.assert_refused(self.payload(target={"repo_url": "http://bb.example.test/scm/kbproj/kb-repo.git"}))
 
     def test_evil_dir_refused(self):
-        """Кр. 4: папка с выходом из клона или в .git — 400, MCP-сервер не запускается."""
+        """Кр. 4: папка с выходом из клона или в .git — 400, в BB не ходили."""
         for d in ("..", "../KB", "/tmp/escape-t010", "KB/../..", ".git", ".git/hooks", "KB/../.git", "KB\x00x"):
             with self.subTest(dir=d):
                 self.assert_refused(self.payload(target={"dir": d}))
@@ -1479,12 +1271,12 @@ class EmployeeSideChecksTest(EvilBase):
                 self.assert_refused(self.payload(target={"branch": b}))
 
     def test_other_task_in_reply_refused(self):
-        """Сервер прислал карточки другой задачи — 400, MCP-сервер не запускается."""
+        """Сервер прислал карточки другой задачи — 400, в BB не ходили."""
         self.assert_refused(self.payload(task={"kind": "once", "id": 8, "title": "Чужая выдуманная задача"}))
         self.assert_refused(self.payload(task={"kind": "regular", "id": 7, "title": "Чужая выдуманная задача"}))
 
     def test_bad_card_content_refused(self):
-        """Карточка без вопроса или с телом не строкой — 400, MCP-сервер не запускается."""
+        """Карточка без вопроса или с телом не строкой — 400, в BB не ходили."""
         for card in ({"file": "7_x.md", "title": "", "body": "Ответ"}, {"file": "7_x.md", "title": "Вопрос?", "body": None},
                      {"file": "7_x.md", "title": ["Вопрос?"], "body": "Ответ"}, "7_x.md"):
             with self.subTest(card=card):
@@ -1504,13 +1296,13 @@ class EmployeeSideChecksTest(EvilBase):
         self.assertRegex(r.get("reason", ""), RU)
 
     def test_server_refusal_passed_through(self):
-        """Отказ сервера в /api/bb/task (права) — браузеру как есть, MCP-сервер не запускается."""
+        """Отказ сервера в /api/bb/task (права) — браузеру как есть, в BB не ходили."""
         self.reg.task_code, self.reg.task_body = 403, {"error": "Выгружает исполнитель или замещающий (выдумка)"}
-        m = self.mcp.mark()
+        m = self.rest.mark()
         code, r = self.evil.call("POST", API_UPLOAD, {"kind": "once", "id": 7}, session="fake-session-t010")
         self.assertEqual(code, 403, r)
         self.assertEqual(r.get("error"), "Выгружает исполнитель или замещающий (выдумка)")
-        self.assertEqual(self.mcp.since(m, "start"), [])
+        self.assertEqual(self.rest.since(m), [])
 
     def test_done_failure_reports_pr(self):
         """PR создан, а сервер не записал выгрузку — ошибка со ссылкой на PR (чтобы вписать вручную), клон удалён."""
@@ -1522,8 +1314,6 @@ class EmployeeSideChecksTest(EvilBase):
         self.assertNotEqual(code, 200, r)
         self.assertTrue(r.get("pr_url"), r)
         self.assertIn(r["pr_url"], r.get("error", ""))
-        self.assert_mcp_finished(self.mcp.since(m))
-        self.assert_tmp_clean(self.evil)
 
 
 class RepoContentTest(EvilBase):
@@ -1549,51 +1339,52 @@ class RepoContentTest(EvilBase):
             cls.bare_dir = BareRepo(cls.work, extra=dir_link, name="kb-dirlink.git")
             cls.bare_empty = BareRepo(cls.work, extra=lambda seed: None, name="kb-nokb.git")
             cls.bare_file = BareRepo(cls.work, extra=file_link, name="kb-filelink.git")
+            for b, slug in ((cls.bare_dir, "kb-dirlink"), (cls.bare_empty, "kb-nokb"),
+                            (cls.bare_file, "kb-filelink")):
+                cls.rest.repos[f"{PROJECT}/{slug}"] = b.path
         except Exception:
             cls.tearDownClass()
             raise
 
-    def tearDown(self):
-        self.mcp.set(bare=str(self.bare.path))
-
-    def check(self, bare):
-        self.mcp.set(bare=str(bare.path))
-        code, r, n, m = self.evil_upload(self.payload(), fresh=True)
+    def check(self, bare, slug):
+        """Символическая ссылка в репозитории (папка или файл карточки) — отказ до коммита, вне клона ничего."""
+        self.clone_wipe()
+        code, r, n, m = self.evil_upload(self.payload(target={"repo_url": str(bare.path), "repo": slug}), fresh=True)
         self.assertEqual(code, 400, r)
         self.assertRegex(r.get("error", ""), RU)
         self.assertEqual(r.get("step", "запись файлов"), "запись файлов", r)
         self.assertEqual(self.reg.done_reqs(n), [])
         self.assertEqual(list(self.outside.iterdir()), [], "карточка записана вне клона (по ссылке-папке)")
         self.assertEqual(self.outside_file.read_text("utf-8"), "Чужой файл вне клона\n", "файл вне клона перезаписан")
-        names = [x["name"] for x in self.mcp.since(m, "call")]
-        self.assertFalse(set(names) & {"bitbucket_add", "bitbucket_commit", "bitbucket_push",
-                                       "bitbucket_create_pull_request"}, names)
-        self.assert_mcp_finished(self.mcp.since(m))
-        self.assert_tmp_clean(self.evil)
+        self.assertEqual(self.rest.since(m), [], "pull request не создавался")
+
+    def clone_wipe(self):
+        import shutil as _s
+        _s.rmtree(self.work / "bb-clone", ignore_errors=True)   # клон с чужим репозиторием — переклонировать
 
     def test_kb_dir_missing_is_created(self):
         """В целевой ветке ещё нет папки KB — прокси её создаёт, выгрузка проходит."""
-        self.mcp.set(bare=str(self.bare_empty.path))
-        code, r, n, m = self.evil_upload(self.payload(), fresh=True)
+        self.clone_wipe()
+        code, r, n, m = self.evil_upload(self.payload(target={"repo_url": str(self.bare_empty.path),
+                                                              "repo": "kb-nokb"}), fresh=True)
         self.assertEqual(code, 200, r)
         self.assertEqual(self.bare_empty.changed(DEF_BRANCH, r["branch"]), {"KB/7_Выдуманный вопрос.md"})
         self.assertEqual(self.bare_empty.show(r["branch"], "KB/7_Выдуманный вопрос.md"), "# Выдуманный вопрос?\n\nОтвет\n")
 
     def test_target_branch_missing(self):
-        """Целевой ветки нет в репозитории — 400, шаг «checkout», подсказка про REG_BB_BRANCH, в задаче ничего."""
+        """Целевой ветки нет в репозитории — 400, шаг «fetch», подсказка про ветку, в задаче ничего."""
+        self.clone_wipe()
         code, r, n, m = self.evil_upload(self.payload(target={"branch": "release/no-such"}), fresh=True)
         self.assertEqual(code, 400, r)
-        self.assertEqual(r.get("step", "checkout"), "checkout", r)
-        self.assertRegex(r.get("error", ""), r"REG_BB_BRANCH")
+        self.assertEqual(r.get("step", "fetch"), "fetch", r)
+        self.assertRegex(r.get("error", ""), r"ветк")
         self.assertEqual(self.reg.done_reqs(n), [])
-        self.assert_mcp_finished(self.mcp.since(m))
-        self.assert_tmp_clean(self.evil)
 
     def test_dir_is_symlink(self):
-        self.check(self.bare_dir)
+        self.check(self.bare_dir, "kb-dirlink")
 
     def test_card_file_is_symlink(self):
-        self.check(self.bare_file)
+        self.check(self.bare_file, "kb-filelink")
 
 
 # ================================================================ регрессия: прокси как прокси
@@ -1626,28 +1417,28 @@ class ProxyRegressionTest(BBBase):
 
 
     def test_bb_without_token_refused(self):
-        """Чужая страница без токена реестра (X-Token) не запустит выгрузку: 403 от сервера, MCP не запускается."""
+        """Чужая страница без токена реестра (X-Token) не запустит выгрузку: 403 от сервера, в BB не ходили."""
         t, _ = self.task_in(cards=CARDS[:1])
-        before, m = self.snap(self.get(t)), self.mcp.mark()
+        before, m = self.snap(self.get(t)), self.rest.mark()
         code, r = self.proxy.call("POST", API_UPLOAD, {"kind": t["kind"], "id": t["id"]}, session=self.sid[EXE], token=False)
         self.assertEqual(code, 403, r)
         code, r = self.proxy.call("GET", API_STATUS, session=self.sid[EXE], token=False)
         self.assertEqual(code, 403, r)
-        self.assertEqual(self.mcp.since(m, "start"), [])
+        self.assertEqual(self.rest.since(m), [])
         self.assertEqual(self.snap(self.get(t)), before)
 
     def test_server_down(self):
-        """Сервер реестра не отвечает — статус и выгрузка: понятная ошибка по-русски, MCP не запускается."""
+        """Сервер реестра не отвечает — статус и выгрузка: понятная ошибка по-русски, в BB не ходили."""
         dead = free_port()
         p = self.start_proxy(target=f"127.0.0.1:{dead}")
         self.addCleanup(p.stop)
-        m = self.mcp.mark()
+        m = self.rest.mark()
         for method, path, body in (("GET", API_STATUS, None), ("POST", API_UPLOAD, {"kind": "once", "id": 1})):
             with self.subTest(path=path):
                 code, r = p.call(method, path, body, session=self.sid[EXE], timeout=90)
                 self.assertGreaterEqual(code, 400, r)
                 self.assertRegex(r.get("error", "") + r.get("reason", ""), RU)
-        self.assertEqual(self.mcp.since(m, "start"), [])
+        self.assertEqual(self.rest.since(m), [])
 
 
 # ================================================================ критерии 3, 7: connect.sh (статически)
@@ -1676,12 +1467,14 @@ class ConnectShStaticTest(unittest.TestCase):
                 return m
         self.fail("нет скрытого ввода пароля BB (read -s)")
 
-    def test_asks_bb_creds_only_with_mcp(self):
-        """Логин и пароль BB спрашиваются только при заданном REG_BB_MCP; пароль — скрытым вводом."""
-        m = self.silent_read()
-        before = CONNECT[:m.start()].splitlines()[-25:]
-        self.assertTrue(any("REG_BB_MCP" in ln and re.search(r"\bif\b|\[\[|\[ |&&", ln) for ln in before),
-                        "запрос учётки BB не под условием REG_BB_MCP")
+    def test_asks_bb_creds_always(self):
+        """Логин BB спрашивается при каждом запуске — без условий (пароль — под проверкой пустого логина)."""
+        m = re.search(r'^\s*read .*Логин BB', CONNECT, re.M)
+        self.assertTrue(m, "нет запроса логина BB")
+        before = CONNECT[:m.start()].splitlines()[-6:]
+        self.assertFalse(any(re.search(r"\bif\b|\[\[", ln) for ln in before),
+                         "запрос логина BB не должен быть под условием")
+        self.assertIn("Логин BB", CONNECT)
 
     def test_creds_via_pipe_to_proxy(self):
         """Учётка — в прокси через канал на stdin (--bb-creds-stdin), не аргументом и не окружением."""
@@ -1952,7 +1745,7 @@ class ConnectShSandboxTest(unittest.TestCase):
         mcp = self.dir / "mcp" / "server.py"
         mcp.parent.mkdir()
         mcp.write_text("# выдуманный server.py\n", "utf-8")
-        p = self.run_connect(f"{BB_LOGIN}\n{BB_PASS}\n", f"REG_BB_MCP={mcp}\nREG_BB_BASE_URL={BB_BASE}\n")
+        p = self.run_connect(f"{BB_LOGIN}\n{BB_PASS}\n", f"REG_BB_BASE_URL={BB_BASE}\n")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         recs = self.records()
         self.assertEqual(len(recs), 1, p.stdout + p.stderr)
@@ -1977,14 +1770,13 @@ class ConnectShSandboxTest(unittest.TestCase):
         self.assertNotIn(sha(BB_PASS), rec["stdin_sha"], "пароль ушёл в прокси, хотя логин пустой")
         self.assertEqual(rec["stdin_sha"][0], sha(""))
 
-    def test_without_mcp_no_prompt(self):
-        """Без REG_BB_MCP учётку BB не спрашивают и прокси её не получает."""
-        p = self.run_connect(f"{BB_LOGIN}\n{BB_PASS}\n")
+    def test_empty_login_disables_bb(self):
+        """Enter вместо логина — пароль не спрашивается, прокси получает пустой логин (BB выключен)."""
+        p = self.run_connect("\n")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         rec = self.records()[0]
-        self.assertNotIn(sha(BB_PASS), rec["stdin_sha"])
-        self.assertNotIn(sha(BB_LOGIN), rec["stdin_sha"])
-        self.assertNotIn(CREDS_FLAG, rec["argv"])
+        self.assertEqual(rec["stdin_sha"][0], sha(""), "пустой логин должен уйти в прокси")
+        self.assertNotIn(sha(BB_PASS), rec["stdin_sha"], "пароль спросили, хотя логин пустой")
 
     def test_secret_in_registry_env_stops(self):
         """В registry.env есть BITBUCKET_PASSWORD — connect.sh останавливается, прокси не запускается."""

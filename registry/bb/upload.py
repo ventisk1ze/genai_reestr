@@ -1,46 +1,32 @@
-"""Сторона сотрудника: выгрузка карточек в BB из контейнера сотрудника через его прокси.
+"""Полная выгрузка карточек задачи (T-010/T-013): сторона сотрудника, без MCP.
 
-Прокси сам обрабатывает /api/bb/status и /api/bb/upload: по сессии сотрудника берёт у сервера
-реестра права, карточки и настройки репозитория, проверяет их (серверу не доверяем), запускает
-у себя MCP-сервер BB (stdio) и вызывает его инструменты; серверу отдаёт только результат.
+git напрямую (постоянный клон REG_BB_CLONE — при старте прокси проверяется и обновляется,
+при выгрузке переиспользуется; сбой push/PR — переклонирование и один повтор) и pull request
+через REST API Bitbucket. Серверу реестра прокси не доверяет (проверяет ответ /api/bb/task),
+сервер — прокси (/api/bb/done). Учётка BB — только в памяти прокси (askpass-канал, REST-заголовок).
 """
 import json
-import os
-import re
 import shutil
-import tempfile
 import threading
-import time
-import urllib.error
-import urllib.request
 from datetime import datetime
-from pathlib import Path
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode
 
 from registry import config, creds
-from registry.bb import BB_PR_URL_RE, bb_file_ok, bb_target_problem, bb_url_parts
-from registry.bb.mcp import BbFail, BbNothing, McpClient, bb_message, mcp_text, mcp_value
+from registry.bb import bb_file_ok, bb_target_problem
+from registry.bb.direct import (BbFail, BbNothing, bb_message, ensure_clone, git, no_changes,
+                                refresh_clone, rest_create_pr, url_ok_for_creds)
 from registry.errors import BadRequest
 from registry.util import NoRedirect, dumps
 
-BB_LOCK = threading.Lock()   # одна выгрузка за раз
-BB_LIVE = []                 # идущие выгрузки (MCP-клиент, временная папка) — дочистить, если прокси остановят
-
-
-def bb_mcp_path():
-    p = Path(config.BB_MCP)
-    return p if p.is_absolute() else config.HERE / p
+BB_LOCK = threading.Lock()   # одна выгрузка/отправка за раз (клоны общие)
 
 
 def bb_local_problem():
-    """Что не так с настройками BB у сотрудника (пусто — готово)."""
-    if not config.BB_MCP:
-        return ("У вас не задан REG_BB_MCP — путь к server.py MCP-сервера BB: добавьте его в registry.env рядом "
-                "со своим app.py и перезапустите bash connect.sh")
-    if not bb_mcp_path().is_file():
-        return f"Нет файла MCP-сервера BB {bb_mcp_path()} (REG_BB_MCP в вашем registry.env)"
-    if not shutil.which(config.BB_MCP_PYTHON):
-        return f"Не найден python для MCP-сервера: {config.BB_MCP_PYTHON} (REG_BB_MCP_PYTHON в вашем registry.env)"
+    """Что не так у сотрудника для работы с Bitbucket (пусто — готово). Без MCP: нужны git, учётка и адрес."""
+    import shutil as _sh
+    from registry.bb import bb_url_parts
+    if not _sh.which("git"):
+        return "в вашем контейнере не найден git — он нужен для работы с Bitbucket"
     if "@" in config.BB_BASE_URL:
         return "В REG_BB_BASE_URL — логин или пароль: уберите их, учётку BB connect.sh спрашивает при каждом запуске"
     if not bb_url_parts(config.BB_BASE_URL):
@@ -53,6 +39,8 @@ def bb_local_problem():
 
 def bb_server_call(server, method, path, headers, body=None, timeout=60):
     """Запрос прокси к серверу реестра от имени браузера сотрудника: только X-Token и X-Session из его запроса."""
+    import urllib.error
+    import urllib.request
     h = {"X-Token": headers.get("X-Token") or "", "X-Session": headers.get("X-Session") or "",
          "Content-Type": "application/json"}
     req = urllib.request.Request(server + path, method=method, headers=h,
@@ -73,21 +61,22 @@ def bb_server_call(server, method, path, headers, body=None, timeout=60):
 
 
 def bb_proxy_status(server, headers):
-    """GET /api/bb/status на прокси: готово, если у владельца настроен репозиторий, а у сотрудника — MCP и учётка."""
+    """GET /api/bb/status на прокси: готово, если у владельца настроен репозиторий, а у сотрудника — git и учётка."""
     code, srv = bb_server_call(server, "GET", "/api/bb/status", headers, timeout=20)
     if code not in (200, 404):
         return code, srv
-    configured = code == 200 and srv.get("server_configured") is True
     problems = [p for p in (bb_local_problem(),) if p]
     if code == 404:
         problems.append("Сервер реестра не умеет выгружать в BB — владельцу нужно обновить реестр")
-    elif not configured:
-        miss = [m for m in srv.get("missing") or [] if isinstance(m, str) and re.fullmatch(r"REG_BB_[A-Z_]{1,30}", m)]
+    elif not (isinstance(srv, dict) and srv.get("server_configured") is True):
+        miss = [m for m in (srv.get("missing") or []) if isinstance(m, str)]
         problems.append("Владелец реестра не настроил репозиторий БЗ"
                         + (": нужно задать в его registry.env " + ", ".join(miss) if miss else ""))
-    out = {"available": not problems, "reason": "; ".join(problems), "via": "proxy", "server_configured": configured}
-    if isinstance(srv.get("target"), dict):
-        out["target"] = {k: str(srv["target"].get(k) or "")[:300] for k in ("repo_url", "project", "repo", "branch", "dir")}
+    out = {"available": not problems, "reason": "; ".join(problems), "via": "proxy",
+           "server_configured": code == 200 and isinstance(srv, dict) and srv.get("server_configured") is True}
+    if isinstance(srv, dict) and isinstance(srv.get("target"), dict):
+        out["target"] = {k: str(srv["target"].get(k) or "")[:300]
+                         for k in ("repo_url", "project", "repo", "branch", "dir")}
     return 200, out
 
 
@@ -102,13 +91,10 @@ def bb_check_reply(d, kind, tid):
     if not isinstance(tg, dict):
         raise bad("нет настроек репозитория")
     url = tg.get("repo_url")
-    if isinstance(url, str) and "@" in urlparse(url).netloc:
-        raise bad("в адресе репозитория есть логин (…@) — учётка BB уходит только вашему MCP-серверу")
-    if not bb_url_parts(url):
-        raise bad("адрес репозитория — не http(s) или с недопустимыми символами (?запрос, #фрагмент, пробелы)")
-    if bb_url_parts(url) != bb_url_parts(config.BB_BASE_URL):
-        raise bad(f"репозиторий на {urlparse(url).netloc} — это не ваш корпоративный Bitbucket "
-                  f"{urlparse(config.BB_BASE_URL).netloc} (REG_BB_BASE_URL), учётку BB туда не отправляем")
+    if isinstance(url, str) and "@" in bb_url_parts_host(url):
+        raise bad("в адресе репозитория есть логин (…@) — учётка BB уходит только вашему git")
+    if not url_ok_for_creds(url):
+        raise bad("адрес репозитория — чужой хост или недопустимые символы (?запрос, #фрагмент, пробелы)")
     problem = bb_target_problem(tg)
     if problem:
         raise bad(problem)
@@ -129,20 +115,14 @@ def bb_check_reply(d, kind, tid):
             {k: tg[k] for k in ("repo_url", "project", "repo", "branch", "dir")}, by[:200])
 
 
-def bb_clone_dir(path):
-    """Клон, который сделал MCP-сервер: сам path или единственная папка с .git внутри него."""
-    if os.path.isdir(os.path.join(path, ".git")):
-        return path
-    subs = [d for d in (os.listdir(path) if os.path.isdir(path) else [])
-            if os.path.isdir(os.path.join(path, d, ".git"))]
-    if len(subs) == 1:
-        return os.path.join(path, subs[0])
-    raise BbFail("clone", "после клонирования в папке выгрузки нет git-репозитория — MCP-сервер положил клон "
-                          "в другое место")
+def bb_url_parts_host(url):
+    from urllib.parse import urlparse
+    return urlparse(url).netloc if isinstance(url, str) else ""
 
 
 def bb_write_cards(repo, d, cards):
     """Файлы карточек — только внутри клона: <клон>/<папка>/<файл>.md, без перехода по символическим ссылкам."""
+    import os
     root = os.path.realpath(repo)
     cur = root
     for seg in d.split("/"):
@@ -167,93 +147,59 @@ def bb_write_cards(repo, d, cards):
     return files
 
 
-def bb_no_changes(res):
-    v = mcp_value(res)
-    if isinstance(v, (list, dict)):
-        return not v
-    s = str(v if v is not None else "").strip()
-    return not s or bool(re.search(r"nothing to commit|working tree clean", s, re.I))
+def server_token(server):
+    """Ключ API со страницы сервера реестра — для стартовых запросов (без браузера его взять больше неоткуда)."""
+    import re as _re
+    import urllib.request as _u
+    try:
+        with _u.build_opener(_u.ProxyHandler({})).open(server + "/", timeout=20) as r:
+            m = _re.search(r"TOKEN\s*=\s*['\"]([^'\"]+)['\"]", r.read().decode("utf-8", "replace"))
+        return {"X-Token": m.group(1)} if m else {}
+    except Exception:   # noqa — сервер недоступен: стартовые клоны пропустим с предупреждением
+        return {}
 
 
-def bb_pr_info(res):
-    """Ссылка и номер pull request из ответа bitbucket_create_pull_request ({id, title, state, url})."""
-    v = mcp_value(res)
-    if isinstance(v, str):
-        m = re.search(r"\{.*\}", v, re.S)
-        try:
-            v = json.loads(m.group(0)) if m else v
-        except ValueError:
-            pass
-    url, pid = "", None
-    if isinstance(v, dict):
-        url, pid = v.get("url") or "", v.get("id")
-        if not url:
-            try:
-                url = v["links"]["self"][0]["href"]
-            except (KeyError, IndexError, TypeError):
-                url = ""
-    elif isinstance(v, str):
-        m = re.search(r"https?://\S+/pull-requests/\d+", v)
-        url = m.group(0) if m else ""
-    url = url if isinstance(url, str) else ""
-    if pid in (None, "") and url:
-        m = re.search(r"/pull-requests/(\d+)", url)
-        pid = m.group(1) if m else None
-    return url, pid
+def bb_startup(server):
+    """При запуске прокси: клон репозитория выгрузки — проверить/склонировать/обновить (best effort)."""
+    try:
+        code, srv = bb_server_call(server, "GET", "/api/bb/status", server_token(server), timeout=20)
+        tg = srv.get("target") if isinstance(srv, dict) else None
+        if code != 200 or not isinstance(tg, dict) or not tg.get("repo_url"):
+            print("Выгрузка в BB: клон при запуске пропущен — репозиторий не настроен у владельца", flush=True)
+            return
+        ensure_clone(tg["repo_url"], config.BB_CLONE)
+        refresh_clone(config.BB_CLONE, tg["branch"])
+        print(f"Выгрузка в BB: клон в {config.BB_CLONE} (ветка {tg['branch']})", flush=True)
+    except Exception as e:   # noqa — старт не должен падать из-за BB
+        print(f"Выгрузка в BB: клон при запуске не удался — {bb_message('clone', creds.bb_mask(str(e)))}\n"
+              "  Выгрузка доклонирует при необходимости", flush=True)
 
 
-def bb_upload(task, cards, tg, by):
-    """Выгрузка во временный клон через MCP-сервер BB; возвращает {pr_url, pr_id, branch, files}.
-    Клон и MCP-сервер убираются всегда — и при ошибке."""
+def bb_upload(task, cards, tg, by, attempt=1):
+    """Выгрузка всех карточек задачи: свежая база (fetch) → ветка kb/… → файлы в папку → commit → push →
+    PR через REST. Возвращает {pr_url, pr_id, branch, files}. attempt>1 — повтор после переклонирования:
+    ветка с суффиксом (та же секунда — иначе push уже запушенной ветки не пройдёт)."""
     kind, tid, title = task["kind"], task["id"], task["title"]
     label = f"Рег. {tid}" if kind == "regular" else str(tid)
     head = title if len(title) <= 120 else title[:119].rstrip() + "…"
-    branch = f"kb/{kind}-{tid}-{datetime.now():%Y%m%d-%H%M%S}"
-    tmp = tempfile.mkdtemp(prefix="ck-bb-")
-    mcp = McpClient(str(bb_mcp_path()), time.monotonic() + config.BB_TIMEOUT)
-    live = (mcp, tmp)
-    BB_LIVE.append(live)
-    try:
-        mcp.start("запуск MCP-сервера")
-        mcp.initialize("запуск MCP-сервера")
-        repo = os.path.join(tmp, "repo")
-        mcp.call("bitbucket_clone", {"url": tg["repo_url"], "path": repo}, "clone")
-        repo = bb_clone_dir(repo)
-        mcp.call("bitbucket_checkout", {"repo_path": repo, "branch": tg["branch"]}, "checkout")
-        mcp.call("bitbucket_checkout", {"repo_path": repo, "branch": branch, "create": True}, "новая ветка")
-        files = bb_write_cards(repo, tg["dir"], cards)
-        mcp.call("bitbucket_add", {"repo_path": repo, "paths": files}, "add")
-        if bb_no_changes(mcp.call("bitbucket_status", {"repo_path": repo}, "status")):
-            raise BbNothing()
-        try:
-            mcp.call("bitbucket_commit", {"repo_path": repo, "message": f"Карточки знаний по задаче {label}: {head}"},
-                     "commit")
-        except BbFail as e:
-            if re.search(r"nothing to commit|nothing added to commit|no changes added", e.text, re.I):
-                raise BbNothing()
-            raise
-        mcp.call("bitbucket_push", {"repo_path": repo, "remote": "origin", "branch": branch}, "push")
-        desc = (f"Карточки знаний из реестра задач ЦК по задаче {label} «{title}».\n"
-                f"Выгрузил(а) из реестра: {by or 'сотрудник'}.\n\nФайлы ({len(files)}):\n"
-                + "\n".join(f"- {f}" for f in files))
-        res = mcp.call("bitbucket_create_pull_request",
-                       {"project": tg["project"], "repo": tg["repo"], "source_branch": branch,
-                        "target_branch": tg["branch"], "title": f"Карточки знаний: задача {label} — {head}",
-                        "description": desc}, "pull request")
-        url, pid = bb_pr_info(res)
-        if not (isinstance(url, str) and len(url) <= 500 and BB_PR_URL_RE.fullmatch(url)
-                and str(pid).isdigit() and 0 < int(pid) < 10 ** 12):
-            raise BbFail("pull request", f"MCP-сервер не вернул ссылку и номер pull request (проверьте ветку {branch} "
-                                         f"в Bitbucket): {mcp_text(res)[:300]}")
-        return {"pr_url": url, "pr_id": int(pid), "branch": branch, "files": files}
-    except BbFail as e:   # для журнала прокси: хвост stderr MCP-сервера (~2000 символов, с маской учётки)
-        e.diag = mcp.stderr_tail(lines=60, n=2000) if mcp.proc else ""
-        raise
-    finally:
-        mcp.close()
-        shutil.rmtree(tmp, ignore_errors=True)
-        if live in BB_LIVE:
-            BB_LIVE.remove(live)
+    branch = f"kb/{kind}-{tid}-{datetime.now():%Y%m%d-%H%M%S}" + (f"-r{attempt}" if attempt > 1 else "")
+    clone = ensure_clone(tg["repo_url"], config.BB_CLONE)
+    rp = str(clone)
+    refresh_clone(clone, tg["branch"])
+    git(["checkout", "--quiet", "-b", branch], cwd=rp, step="новая ветка")
+    files = bb_write_cards(rp, tg["dir"], cards)
+    git(["add", "--", *files], cwd=rp, step="add")
+    if no_changes(clone):
+        raise BbNothing()
+    git(["commit", "--quiet", "-m", f"Карточки знаний по задаче {label}: {head}"], cwd=rp, step="commit")
+    git(["push", "--quiet", "origin", branch], cwd=rp, step="push")
+    desc = (f"Карточки знаний из реестра задач ЦК по задаче {label} «{title}».\n"
+            f"Выгрузил(а) из реестра: {by or 'сотрудник'}.\n\nФайлы ({len(files)}):\n"
+            + "\n".join(f"- {f}" for f in files))
+    pr_url, pr_id = rest_create_pr(tg["project"], tg["repo"],
+                                   title=f"Карточки знаний: задача {label} — {head}",
+                                   description=desc, src=branch, dst=tg["branch"])
+    return {"pr_url": pr_url, "pr_id": pr_id, "branch": branch, "files": files}
 
 
 def bb_proxy_upload(server, headers, raw):
@@ -283,27 +229,25 @@ def bb_proxy_upload(server, headers, raw):
             res = bb_upload(task, cards, tg, by)
         except BbNothing:
             return 400, {"error": "В BB эти карточки уже лежат без изменений — выгружать нечего", "step": "status"}
-        except BbFail as e:
-            msg = bb_message(e.step, e.text)
-            diag = getattr(e, "diag", "")
-            print(f"BB: задача {kind} {tid} — {msg}" + (f"\n  stderr MCP-сервера: {diag}" if diag else ""), flush=True)
-            return 400, {"error": msg, "step": e.step}
+        except BbFail:
+            shutil.rmtree(config.BB_CLONE, ignore_errors=True)   # клон мог протухнуть — переклонировать
+            try:
+                res = bb_upload(task, cards, tg, by, attempt=2)
+            except BbNothing:
+                return 400, {"error": "В BB эти карточки уже лежат без изменений — выгружать нечего", "step": "status"}
         code, done = bb_server_call(server, "POST", "/api/bb/done", headers, {"kind": kind, "id": tid, **res})
         if code != 200:
             return code, {**res, "error": f"Pull request создан: {res['pr_url']} — но записать его в задачу не удалось "
-                                          f"({done.get('error') or f'HTTP {code}'}). Впишите ссылку в «Факт размещения "
+                                          f"({(done or {}).get('error') or f'HTTP {code}'}). Впишите ссылку в «Факт размещения "
                                           "карточки» вручную."}
         print(f"BB: задача {kind} {tid} — pull request №{res['pr_id']} {res['pr_url']} (ветка {res['branch']})",
               flush=True)
         return 200, {**res, "task": done.get("task")}
+    except BbFail as e:
+        msg = bb_message(e.step, e.text)
+        print(f"BB: {msg}", flush=True)
+        return 400, {"error": msg, "step": e.step}
     except Exception as e:   # noqa — что бы ни случилось, учётку в ответ не отдаём
         return 500, {"error": "Выгрузка в BB не удалась: " + creds.bb_mask(f"{type(e).__name__}: {e}")}
     finally:
         BB_LOCK.release()
-
-
-def bb_cleanup():
-    """Прокси останавливают посреди выгрузки: остановить MCP-сервер и удалить временный клон."""
-    for mcp, tmp in list(BB_LIVE):
-        mcp.close()
-        shutil.rmtree(tmp, ignore_errors=True)

@@ -5,6 +5,7 @@
 проверяет права и узел, отдаёт прокси карточку и цель (/api/kb/task), записывает результат
 (/api/kb/done). Онтологию, постоянный клон и отправку (через PR) делает прокси сотрудника.
 """
+from pathlib import Path
 from urllib.parse import urlparse
 
 from registry import config, runtime
@@ -28,7 +29,7 @@ def kb_target_problem():
         return "не задан REG_KB_REPO_URL (адрес клонирования базы знаний)"
     if "@" in urlparse(config.KB_REPO_URL).netloc:
         return "в REG_KB_REPO_URL есть логин (…@) — уберите его, учётка BB у каждого своя"
-    if not bb_url_parts(config.KB_REPO_URL):
+    if not (bb_url_parts(config.KB_REPO_URL) or Path(config.KB_REPO_URL).is_dir()):
         return "REG_KB_REPO_URL — нужен адрес клонирования http(s), без ?запроса и #фрагмента"
     if not bb_branch_ok(config.KB_BRANCH):
         return "REG_KB_BRANCH — недопустимое имя ветки"

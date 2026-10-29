@@ -142,18 +142,21 @@ AI_FILE_TYPES = (".docx", ".txt")
 AI_FILE_BODY_MAX = (AI_FILE_MAX_BYTES + 2) // 3 * 4 + 64 * 1024   # тело POST /api/ai/file: base64 файла + JSON
 
 # ---------------------------------------------------------------- выгрузка карточек в BB (T-010)
-# Настройки несекретные, в registry.env: у владельца — репозиторий (REG_BB_REPO_URL, REG_BB_PROJECT,
-# REG_BB_REPO, REG_BB_BRANCH, REG_BB_DIR), у сотрудника — свой MCP-сервер и Bitbucket (REG_BB_MCP,
-# REG_BB_MCP_PYTHON, REG_BB_BASE_URL, REG_BB_TIMEOUT). Логин и пароль BB — только в памяти прокси.
-BB_MCP = os.path.expanduser(os.environ.get("REG_BB_MCP", "").strip())          # путь к server.py MCP-сервера BB
-BB_MCP_PYTHON = os.path.expanduser(os.environ.get("REG_BB_MCP_PYTHON", "").strip()) or "python3"
+# Настройки несекретные, в registry.env: у владельца — репозитории (REG_BB_* выгрузки T-010,
+# REG_KB_* базы знаний), у сотрудника — корпоративный Bitbucket и клоны (REG_BB_BASE_URL,
+# REG_BB_TIMEOUT, REG_BB_CLONE, REG_KB_CLONE). Логин и пароль BB — только в памяти прокси.
+# ---------------------------------------------------------------- Bitbucket: без MCP (T-013)
+# Прямой git (клон/коммит/push; учётка — через askpass-канал, только в памяти прокси)
+# и REST API (pull request). Настройки сотрудника: корпоративный Bitbucket, предел операции
+# и пути постоянных клонов. Логин и пароль BB — только в памяти прокси (connect.sh, stdin).
 BB_BASE_URL = os.environ.get("REG_BB_BASE_URL", "").strip().rstrip("/") or "https://df-bitbucket.ca.sbrf.ru"
-BB_TIMEOUT = env_num("REG_BB_TIMEOUT", 600)   # общий предел одной выгрузки, с
+BB_TIMEOUT = env_num("REG_BB_TIMEOUT", 600)   # общий предел одной операции (git/REST), с
+BB_CLONE = os.path.expanduser(os.environ.get("REG_BB_CLONE", "~/bb").strip() or "~/bb")   # клон выгрузки T-010
 
 # ---------------------------------------------------------------- базы знаний (T-012)
 # Одна база знаний — git-репозиторий с онтологией (ontology.yml), глоссарием и FAQ. Адрес и ветка —
-# у владельца; узлы онтологии — папки для карточек. Онтологию парсит MCP-сервер (pyyaml у него есть),
-# реестр получает готовое дерево JSON. Постоянный клон — у сотрудника (REG_KB_CLONE).
+# у владельца; узлы онтологии — папки для карточек. Онтология — файл ontology.yml в клоне
+# (парсер встроенный, формат пользователя). Постоянный клон — у сотрудника (REG_KB_CLONE).
 KB_REPO_URL = os.environ.get("REG_KB_REPO_URL", "").strip()   # адрес клонирования единственной БЗ
 KB_BRANCH = os.environ.get("REG_KB_BRANCH", "master").strip() or "master"
 KB_CLONE = os.path.expanduser(os.environ.get("REG_KB_CLONE", "~/kb").strip() or "~/kb")

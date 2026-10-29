@@ -1,9 +1,9 @@
-"""T-012: база знаний — одна, в настройках владельца; узлы онтологии; отправка карточки через PR.
+"""T-012: база знаний — одна, в настройках владельца; узлы онтологии; отправка карточки через PR (прямой git+REST).
 
-Каркас — test_t010 (BBBase: сервер реестра + прокси сотрудника + фейковый MCP-сервер поверх локальных
-bare-репозиториев). БЗ — bare-репозиторий в repos_root фейка, засеянный ontology.yml; адрес — в
-REG_KB_REPO_URL у владельца. Постоянный клон — REG_KB_CLONE у сотрудника: переиспользуется между
-отправками, при сбое push/PR — переклонируется. Все данные выдуманные; учётка BB — только в памяти прокси.
+Каркас — test_t010 (BBBase: сервер реестра + прокси сотрудника + REST-фейк Bitbucket). БЗ — локальный
+bare-репозиторий, засеянный ontology.yml; адрес — в REG_KB_REPO_URL у владельца (локальный путь — git
+без учётки). Постоянный клон — REG_KB_CLONE у сотрудника: переиспользуется между отправками, при сбое
+push/PR — переклонируется. Все данные выдуманные; учётка BB — только в памяти прокси.
 """
 import json
 import os
@@ -18,13 +18,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import APP, ROOT, Server, clean_env, free_port  # noqa: E402
 import test_t010 as t10  # noqa: E402
+from fake_bb_rest import FakeBitbucket  # noqa: E402
 from test_t010 import (ADMIN_ARGS, ADMIN_PIN, APPROVED, BBBase, BB_BASE, BB_LOGIN, BB_PASS, CARDS, DECISION,  # noqa: E402
                        EXE, LEAD, PEOPLE, PINS, POSTANOVKA, RESULT, SRV_ENV, WORK, git_env)
 
 KB_STATUS, KB_ONTOLOGY = "/api/kb/status", "/api/kb/ontology"
 KB_TASK, KB_UPLOAD, KB_DONE = "/api/kb/task", "/api/kb/upload", "/api/kb/done"
 KB_PROJECT, KB_REPO = "kbproj", "kb-cards"
-KB_URL = f"{BB_BASE}/scm/{KB_PROJECT}/{KB_REPO}.git"
+KB_URL = None   # адрес БЗ — путь к локальному bare (назначается в setUpClass)
+KB_PARTS = f"{KB_PROJECT}/{KB_REPO}"   # проект/репозиторий для REST-фейка
 ONTOLOGY_YML = ("Онтология базы знаний:\n"
                 "    Общие вопросы:\n"
                 "    Аудит моделей:\n"
@@ -91,27 +93,24 @@ class KbRepo:
 class KbBase(BBBase):
     """Тот же каркас, что T-010, плюс: БЗ у владельца (REG_KB_REPO_URL) и постоянный клон у сотрудника."""
 
-    kb_url = KB_URL
     ontology = ONTOLOGY_YML
 
     @classmethod
     def server_env(cls):
-        return {**SRV_ENV, "REG_KB_REPO_URL": cls.kb_url, "REG_KB_BRANCH": "master"}
+        return {**SRV_ENV, "REG_KB_REPO_URL": str(cls.work / KB_PROJECT / f"{KB_REPO}.git"),
+                "REG_KB_BRANCH": "master"}
 
     @classmethod
     def proxy_settings(cls, **extra):
-        return super().proxy_settings(REG_KB_CLONE=str(cls.work / "kb-clone"), **extra)
+        return super().proxy_settings(REG_KB_CLONE=str(cls.work / "kb-clone"), **extra)   # + git_env из BBBase
 
     @classmethod
     def setUpClass(cls):
-        super().setUpClass()
-        cls.repos_root = cls.work / "bb-repos"
-        cls.mcp.set(repos_root=str(cls.repos_root))
-        kb_project = cls.kb_url.split("/scm/")[1].split("/")[0]
-        kb_slug = cls.kb_url.rsplit("/", 1)[-1].removesuffix(".git")
-        cls.kb_repo_path = cls.repos_root / kb_project / f"{kb_slug}.git"
+        super().setUpClass()   # сервер (REG_KB_REPO_URL из server_env), прокси, REST-фейк BBBase
+        cls.kb_repo_path = cls.work / KB_PROJECT / f"{KB_REPO}.git"   # проект/репо — из пути (repo_url_parts)
         files = {"ontology.yml": cls.ontology} if cls.ontology else {"README.md": "# Выдуманная БЗ без онтологии\n"}
         seed_bare(cls.kb_repo_path, files, cls.bare.env)
+        cls.rest.repos[KB_PARTS] = cls.kb_repo_path   # PR для БЗ — в её bare
         cls.clone = Path(cls.work) / "kb-clone"
 
     def kb_repo(self):
@@ -134,11 +133,13 @@ class KbFlowTest(KbBase):
 
     def test_status_via_proxy(self):
         """Кр. 1: статус БЗ через прокси — доступно, цель от сервера, ответ без учётки."""
+        m = self.rest.mark()
         code, r = self.proxy.call("GET", KB_STATUS, session=self.sid[EXE])
         self.assertEqual(code, 200, r)
         self.assertIs(r.get("available"), True, r)
         self.assertEqual(r.get("via"), "proxy", r)
-        self.assertEqual(r.get("target", {}).get("repo_url"), KB_URL, r)
+        self.assertEqual(r.get("target", {}).get("repo_url"), str(self.kb_repo_path), r)
+        self.assertEqual(self.rest.since(m), [], "статус не ходит в BB")
         self.no_secrets(self.proxy.responses[-1], KB_STATUS)
 
     def test_ontology(self):
@@ -153,9 +154,9 @@ class KbFlowTest(KbBase):
         self.wipe_clone()
         t, cards = self.task_in(status=APPROVED)
         card = cards[0]
-        m = self.mcp.mark()
+        m = self.rest.mark()
         r = self.ok_send(t, card)
-        self.assertTrue(r["pr_url"].startswith(BB_BASE + "/"), r)
+        self.assertTrue(r["pr_url"].startswith(self.rest.base + "/"), r)
         self.assertIn("/browse/", r["file_url"])
         self.assertIn("at=master", r["file_url"])
         self.assertIn(urllib.request.quote(NODE), r["file_url"], "узла нет в ссылке на файл")
@@ -178,11 +179,13 @@ class KbFlowTest(KbBase):
         self.assertEqual(bb.get("by"), EXE)
         self.assertIn(HIST_KB, after["history"][-1]["action"])
         self.assertIn(str(r["pr_id"]), after["history"][-1]["action"])
-        # один clone на отправку, MCP завершён, временных файлов не осталось
-        calls = [x["name"] for x in self.mcp.since(m) if x["ev"] == "call"]
-        self.assertEqual(calls.count("bitbucket_clone"), 1, calls)
-        self.assertFalse("bitbucket_create_repository" in calls, "создание БЗ больше не нужно")
-        self.assertTrue(any(x["ev"] == "eof" for x in self.mcp.since(m)), "MCP-сервер не завершился")
+        # REST: один PR с правильной учёткой, проектом и ветками
+        recs = self.rest.since(m)
+        self.assertEqual(len(recs), 1, "один REST-запрос pull request на отправку")
+        self.assertTrue(recs[0]["auth_ok"], "REST получил не ту учётку")
+        pa = recs[0]["payload"]
+        self.assertEqual((pa["fromRef"]["id"], pa["toRef"]["id"]),
+                         (f"refs/heads/{pr_branch}", "refs/heads/master"))
         self.assertTrue((self.clone / ".git").is_dir(), "постоянный клон должен жить после отправки")
         self.no_secrets(self.proxy.responses[-1], KB_UPLOAD)
 
@@ -191,11 +194,11 @@ class KbFlowTest(KbBase):
         self.wipe_clone()
         t, cards = self.task_in(status=APPROVED)
         self.ok_send(t, cards[0])
+        marker = self.clone / ".git" / "reuse-marker"   # маркер: переклонирование стёрло бы его
+        marker.write_text("клон жив", "utf-8")
         self.next_second()
-        m = self.mcp.mark()
         r2 = self.ok_send(t, cards[0])
-        calls = [x["name"] for x in self.mcp.since(m) if x["ev"] == "call"]
-        self.assertNotIn("bitbucket_clone", calls, "клон переиспользуется — второго clone быть не должно")
+        self.assertTrue(marker.exists(), "клон переклонирован — должен переиспользоваться")
         self.assertTrue((self.clone / ".git").is_dir())
         after = self.get(t)
         e = next(x for x in after["cards"] if x["path"] == cards[0]["path"])
@@ -210,6 +213,7 @@ class KbFlowTest(KbBase):
         r = self.ok_send(t, cards[0])
         self.assertTrue((self.clone / ".git").is_dir(), "клон не восстановлен")
         self.assertIn("/browse/", r["file_url"])
+        self.assertTrue((self.clone / ".git").is_dir())
 
     def test_send_after_merge_says_already_there(self):
         """Кр. 2: PR влит, клон протух — PR «без изменений» падает, клон переклонируется,
@@ -221,14 +225,13 @@ class KbFlowTest(KbBase):
         pr_branch = next(b for b in repo.branches() if b.startswith(f"kb-card/once-{t['id']}-"))
         repo.merge(pr_branch, "master")   # «влитие» PR — удалённая ветка ушла вперёд клона
         self.next_second()
-        m = self.mcp.mark()
+        m = self.rest.mark()
         c, r2 = self.proxy.call("POST", KB_UPLOAD, {"kind": t["kind"], "id": t["id"],
                                                     "path": cards[0]["path"], "node": NODE},
                                 session=self.sid[EXE])
         self.assertEqual(c, 400, r2)
         self.assertIn("уже лежит", r2.get("error", ""), r2)
-        calls = [x["name"] for x in self.mcp.since(m) if x["ev"] == "call"]
-        self.assertEqual(calls.count("bitbucket_clone"), 1, "после сбоя PR клон переклонирован один раз")
+        self.assertEqual(self.rest.since(m), [], "«уже лежит» — pull request не создаётся")
         # карточка не переписана — ссылка на первый PR осталась
         after = self.get(t)
         e = next(x for x in after["cards"] if x["path"] == cards[0]["path"])
@@ -261,7 +264,6 @@ class KbFlowTest(KbBase):
 class KbNoOntologyTest(KbBase):
     """БЗ без ontology.yml — понятная 400 с именем файла."""
 
-    kb_url = f"{BB_BASE}/scm/{KB_PROJECT}/kb-empty.git"
     ontology = ""   # без онтологии: сид — один README
 
     def test_ontology_missing(self):
@@ -282,7 +284,7 @@ class ServerSideTest(KbBase):
         code, r = self.s.call("GET", KB_STATUS)
         self.assertEqual(code, 200, r)
         self.assertIs(r.get("configured"), True, r)
-        self.assertEqual(r.get("target", {}).get("repo_url"), KB_URL, r)
+        self.assertEqual(r.get("target", {}).get("repo_url"), str(self.kb_repo_path), r)
         self.assertEqual(r.get("target", {}).get("branch"), "master", r)
 
     def test_kb_task_contract(self):
@@ -295,7 +297,7 @@ class ServerSideTest(KbBase):
         self.assertEqual(code, 200, r)
         self.assertEqual(r["card"]["path"], card["path"])
         self.assertEqual(r["card"]["title"], card["title"])
-        self.assertEqual(r["target"], {"repo_url": KB_URL, "branch": "master", "node": NODE})
+        self.assertEqual(r["target"], {"repo_url": str(self.kb_repo_path), "branch": "master", "node": NODE})
         self.assertEqual(r["by"], EXE)
         # не исполнитель
         code, r = self.s.call("GET", f"{KB_TASK}?{q}", session=self.sid[LEAD])
@@ -401,7 +403,7 @@ class EvilServerKbTest(unittest.TestCase):
         import threading
         import time
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-        from test_t010 import FakeMcp, Proxy
+        from test_t010 import Proxy
         cls._work = tempfile.TemporaryDirectory()
         cls.work = Path(cls._work.name).resolve()
         (cls.work / "repos").mkdir()
@@ -423,30 +425,28 @@ class EvilServerKbTest(unittest.TestCase):
             def do_GET(self):
                 if self.path.startswith(KB_STATUS):
                     return self._j(200, {"available": False, "via": "proxy", "configured": True,
-                                         "target": {"repo_url": KB_URL, "branch": "master"},
+                                         "target": {"repo_url": str(cls.kb_repo_path), "branch": "master"},
                                          "reason": "x"})
                 if self.path.startswith(KB_TASK):
                     return self._j(200, {  # подмена: другой узел и чужая карточка
                         "task": {"kind": "once", "id": 1, "title": "T"},
                         "card": {"path": "cards/1_chuzhaya.md", "title": "Чужая?", "body": "Чужой текст"},
-                        "target": {"repo_url": KB_URL, "branch": "master", "node": "Подменённый узел"},
+                        "target": {"repo_url": str(cls.kb_repo_path), "branch": "master", "node": "Подменённый узел"},
                         "by": EXE})
                 return self._j(404, {"error": "not found"})
 
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
         cls.reg_port = cls.httpd.socket.getsockname()[1]
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
-        cls.mcp = FakeMcp(cls.work, type("B", (), {"path": str(cls.work / "fake.git"), "env": {}})())
-        cls.mcp.set(repos_root=str(cls.work / "repos"))
+        cls.kb_repo_path = cls.work / KB_PROJECT / f"{KB_REPO}.git"
+        seed_bare(cls.kb_repo_path, {"ontology.yml": ONTOLOGY_YML}, {})
         cls.proxy = Proxy(f"127.0.0.1:{cls.reg_port}", cls.work, cls.token,
-                          env={"REG_BB_MCP": str(cls.mcp.server), "REG_BB_MCP_PYTHON": sys.executable,
-                               "REG_BB_BASE_URL": BB_BASE, "REG_BB_TIMEOUT": "30",
-                               "REG_KB_CLONE": str(cls.work / "kb-clone")})
+                          env={"REG_BB_BASE_URL": "http://127.0.0.1:1", "REG_BB_TIMEOUT": "30",
+                               "REG_KB_CLONE": str(cls.work / "kb-clone"), **git_env(cls.work)})
 
     @classmethod
     def tearDownClass(cls):
         cls.proxy.stop()
-        cls.mcp.kill_leftovers()
         cls.httpd.shutdown()
         cls._work.cleanup()
 

@@ -159,7 +159,8 @@ def employee_side_files():
              "registry/errors.py", "registry/runtime.py", "registry/org.py", "registry/sessions.py",
              "registry/auth.py", "registry/creds.py", "registry/cli.py", "registry/proxy.py",
              "registry/store/__init__.py", "registry/store/json_store.py", "registry/store/sqlite_store.py",
-             "registry/store/gp_store.py", "registry/bb/__init__.py", "registry/bb/mcp.py", "registry/bb/upload.py"]
+             "registry/store/gp_store.py", "registry/bb/__init__.py", "registry/bb/direct.py", "registry/bb/ontology.py",
+             "registry/bb/upload.py", "registry/bb/kb.py"]
     return [ROOT / n for n in names]
 
 

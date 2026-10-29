@@ -11,7 +11,7 @@ if grep -q $'\r' "$0"; then sed -i 's/\r$//' "$0"; exec bash "$0" "$@"; fi #
 # Запускает у вас прокси (по умолчанию порт 9000) к http://jlab-<табельный>:<порт>
 # и настраивает GigaCode работать с тем же реестром. Ничего секретного не сохраняет.
 # Выгрузка карточек знаний в BB (Bitbucket) идёт из вашего контейнера и с вашей учёткой BB: задайте в registry.env
-# рядом REG_BB_MCP (путь к server.py MCP-сервера BB) — connect.sh при каждом запуске спросит логин и пароль BB
+# работа с Bitbucket (выгрузка карточек и база знаний) — connect.sh при каждом запуске спросит логин и пароль BB
 # и передаст их прокси через канал на stdin (не через файл и не через окружение): они только в памяти прокси.
 # ============================================================================
 
@@ -71,31 +71,22 @@ if [ -n "$OLD" ] && kill -0 "$OLD" 2>/dev/null && ps -p "$OLD" -o args= 2>/dev/n
 fi
 port_up && die "порт $PPORT занят — PROXY_PORT=9001 bash connect.sh $*"
 
-# --- выгрузка карточек в BB: логин и пароль BB спрашиваем при каждом запуске, нигде не храним
+# --- Bitbucket: логин и пароль BB спрашиваем при каждом запуске, нигде не храним
+# (нужны и выгрузке карточек, и базе знаний; Enter — без работы с Bitbucket в этом запуске)
 BB_USER=""; BB_PASS=""
-if [ -n "${REG_BB_MCP:-}" ]; then
-    BBF="${REG_BB_MCP/#\~/$HOME}"; [[ "$BBF" == /* ]] || BBF="$DIR/$BBF"
-    ok "выгрузка карточек в BB: MCP-сервер $BBF, Bitbucket ${REG_BB_BASE_URL:-https://df-bitbucket.ca.sbrf.ru}"
-    [ -f "$BBF" ] || warn "нет файла $BBF — поправьте REG_BB_MCP в registry.env, иначе выгрузка будет недоступна"
-    read -rp  "    Логин BB (Enter — без выгрузки в BB): " BB_USER
-    if [ -n "$BB_USER" ]; then
-        read -rsp "    Пароль BB: " BB_PASS; echo
-    else
-        warn "логин BB не введён — в этом запуске выгрузка карточек в BB выключена"
-    fi
+ok "Bitbucket: ${REG_BB_BASE_URL:-https://df-bitbucket.ca.sbrf.ru}; клоны: выгрузка ${REG_BB_CLONE:-~/bb}, база знаний ${REG_KB_CLONE:-~/kb}"
+read -rp  "    Логин BB (Enter — без Bitbucket): " BB_USER
+if [ -n "$BB_USER" ]; then
+    read -rsp "    Пароль BB: " BB_PASS; echo
 else
-    echo "  Выгрузка карточек в BB выключена: не задан REG_BB_MCP в registry.env"
+    warn "логин BB не введён — в этом запуске выгрузка карточек и база знаний недоступны"
 fi
 
-if [ -n "${REG_BB_MCP:-}" ]; then
-    # логин и пароль BB уходят прокси через канал на stdin (printf — встроенная команда bash, в аргументах процессов
-    # не видна); не через export: окружение процесса читается из /proc/<pid>/environ. Канал — подстановкой процесса:
-    # подоболочка сразу заменяется на python (exec) и не держит пароль в памяти, пока работает прокси
-    ( exec setsid python3 "$DIR/app.py" proxy "$TARGET" --port "$PPORT" --bb-creds-stdin \
-        < <(printf '%s\n%s\n' "$BB_USER" "$BB_PASS") ) > "$LOG" 2>&1 < /dev/null &
-else
-    ( exec setsid python3 "$DIR/app.py" proxy "$TARGET" --port "$PPORT" ) > "$LOG" 2>&1 < /dev/null &
-fi
+# логин и пароль BB уходят прокси через канал на stdin (printf — встроенная команда bash, в аргументах процессов
+# не видна); не через export: окружение процесса читается из /proc/<pid>/environ. Канал — подстановкой процесса:
+# подоболочка сразу заменяется на python (exec) и не держит пароль в памяти, пока работает прокси
+( exec setsid python3 "$DIR/app.py" proxy "$TARGET" --port "$PPORT" --bb-creds-stdin \
+    < <(printf '%s\n%s\n' "$BB_USER" "$BB_PASS") ) > "$LOG" 2>&1 < /dev/null &
 BG=$!
 BB_ON=""; [ -n "$BB_USER" ] && BB_ON=1
 BB_PASS=""; unset BB_PASS; BB_USER=""; unset BB_USER

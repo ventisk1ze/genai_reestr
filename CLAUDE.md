@@ -7,7 +7,7 @@
 
 ## Состав
 - `app.py` — точка входа (её зовут start.sh, connect.sh, команды GigaCode и тесты); код — в пакете `registry/`
-- `registry/` — бэкенд на FastAPI, послойно: `config`/`errors`/`util`/`runtime` → `org`/`sessions`/`auth` → `store/` (json, sqlite, gp) → `tasks`/`settings`/`cards`/`kb` (база знаний) → `ai/` (скиллы, файлы, шлюз модели) → `bb/` (MCP-клиент Bitbucket: выгрузка T-010 и БЗ T-012) → `api/` (роуты, маппинг ошибок) → `server`/`main`; `proxy.py` и `cli.py` — сторона сотрудника на stdlib
+- `registry/` — бэкенд на FastAPI, послойно: `config`/`errors`/`util`/`runtime` → `org`/`sessions`/`auth` → `store/` (json, sqlite, gp) → `tasks`/`settings`/`cards`/`kb` (база знаний) → `ai/` (скиллы, файлы, шлюз модели) → `bb/` (Bitbucket напрямую — git и REST: выгрузка T-010 и БЗ T-012) → `api/` (роуты, маппинг ошибок) → `server`/`main`; `proxy.py` и `cli.py` — сторона сотрудника на stdlib
 - `templates/index.html` + `static/` — интерфейс без сборки: каркас (Jinja2) и ES-модули `static/js/`, стили `static/css/`
 - `start.sh`, `connect.sh` — запуск владельцем и подключение коллег
 - `skills/<имя>/SKILL.md` — скиллы ассистента, общие для веба и GigaCode
