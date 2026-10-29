@@ -42,7 +42,14 @@ if [ -f "$DIR/registry.env" ]; then
     if grep -Eiq '^[[:space:]]*(export[[:space:]]+)?[A-Z_]*(PASSWORD|PASSWD|PASS|USERNAME|LOGIN|SECRET|TOKEN)[A-Z_]*[[:space:]]*=' "$DIR/registry.env"; then
         die "в registry.env есть логин, пароль или токен — удалите эти строки: их нельзя хранить в файлах"
     fi
+    # окружение команды важнее registry.env — как в app.py: заданное вручную возвращаем после source
+    _keep=""
+    for _v in $(compgen -v | grep -E '^(REG_|GP_|GIGACHAT_)' || true); do
+        _keep="$_keep $_v=$(printf '%q' "${!_v}")"
+    done
     set -a; . "$DIR/registry.env"; set +a
+    [ -n "$_keep" ] && eval "export $_keep"
+    unset _v _keep
     ok "настройки из registry.env"
 fi
 PPORT="${PROXY_PORT:-9000}"

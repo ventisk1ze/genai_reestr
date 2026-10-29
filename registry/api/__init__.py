@@ -36,8 +36,13 @@ def create_app():
     # --- порядок проверок как в прежнем _guard(): сначала хост (--local), потом токен /api/*
     @app.middleware("http")
     async def guard_and_nostore(request: Request, call_next):
-        if runtime.LOCAL_MODE and (request.headers.get("host") or "").split(":")[0] not in ("localhost", "127.0.0.1"):
-            return _err(403, {"error": "forbidden"})
+        if runtime.LOCAL_MODE and config.LOCAL_HOST_CHECK \
+                and (request.headers.get("host") or "").split(":")[0] not in ("localhost", "127.0.0.1"):
+            # --local — запуск на своём ПК: только localhost (защита от DNS-rebinding, отключается
+            # REG_LOCAL_HOST_CHECK=0). На DataLab так и выглядит — с подсказкой
+            return _err(403, {"error": "Сервер запущен с --local и принимает запросы только с localhost. "
+                                    "На DataLab запускайте без --local: bash start.sh "
+                                    "(или REG_LOCAL_HOST_CHECK=0, если --local пробрасывается через прокси)"})
         if request.url.path.startswith("/api/") and request.headers.get("X-Token") != config.TOKEN:
             return _err(403, {"error": "Неверный токен — перезагрузите страницу"})
         response = await call_next(request)

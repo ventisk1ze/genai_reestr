@@ -54,7 +54,19 @@
 /* Ключ API страницы: выдаётся сервером вместе с HTML. Маркер ниже — место для bootstrap.js (если есть). */
 window.TOKEN = '{{ token }}';
 /*__BOOTSTRAP__*/
+/* Адрес страницы без слеша (…/proxy/39246): относительные стили/скрипт ушли бы на уровень выше —
+   чиним до разбора модуля main.js (он отложен); уже запрошенные стили перезагружаются сменой href. */
+(function(){
+  var p = location.pathname;
+  if (p.endsWith('/') || /\.html?$/.test(p)) return;
+  var base = p + '/';   // как BASE в js/api.js
+  document.querySelectorAll('link[rel="stylesheet"]').forEach(function(el){
+    el.href = base + el.getAttribute('href');
+  });
+  var m = document.querySelector('script[type="module"][src]');
+  if (m) m.src = base + m.getAttribute('src');
+})();
 </script>
-<script type="module" src="/static/js/main.js"></script>
+<script type="module" src="static/js/main.js"></script>
 </body>
 </html>

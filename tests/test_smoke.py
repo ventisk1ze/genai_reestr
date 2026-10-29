@@ -70,6 +70,40 @@ class SmokeTest(unittest.TestCase):
             urllib.request.urlopen(self.s.base + "/api/state", timeout=5)
         self.assertEqual(cm.exception.code, 403)
 
+    def test_local_host_check_default_on(self):
+        """--local по умолчанию принимает только localhost: чужой Host — 403 с подсказкой
+        (защита от DNS-rebinding: злая страница резолвит свой домен на 127.0.0.1)."""
+        s = Server("json")
+        try:
+            req = urllib.request.Request(s.base + "/", headers={"Host": "jlab-12345.sbrf.ru"})
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(cm.exception.code, 403)
+            self.assertIn("--local", cm.exception.read().decode("utf-8"))
+        finally:
+            s.stop()
+
+    def test_local_host_check_off(self):
+        """REG_LOCAL_HOST_CHECK=0: --local без проверки Host — например, проброс через локальный прокси."""
+        s = Server("json", env={"REG_LOCAL_HOST_CHECK": "0"})
+        try:
+            req = urllib.request.Request(s.base + "/", headers={"Host": "jlab-12345.sbrf.ru"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                self.assertEqual(r.status, 200)
+        finally:
+            s.stop()
+
+    def test_assets_paths_relative(self):
+        """Урок DataLab: страница живёт за /proxy/<порт>/ — абсолютные /static/… уходят мимо прокси.
+        Стили и модуль main.js — относительные пути; адрес без слеша чинит скрипт в каркасе."""
+        html = frontend_text()
+        self.assertNotIn('href="/static/', html, "абсолютный путь стилей не работает за префиксом")
+        self.assertNotIn('src="/static/', html, "абсолютный путь скрипта не работает за префиксом")
+        for f in ("base.css", "card.css", "ai.css", "theme.css"):
+            self.assertIn(f'href="static/css/{f}"', html)
+        self.assertIn('src="static/js/main.js"', html)
+        self.assertIn('link[rel="stylesheet"]', html, "нет починки стилей для адреса без слеша")
+
     def test_page_base_path_without_trailing_slash(self):
         html = frontend_text()
         self.assertIn("p.endsWith('/') ? p :", html, "адрес …/proxy/39246 без слеша должен работать")
