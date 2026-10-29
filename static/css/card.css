@@ -1,0 +1,72 @@
+/* card.css — карточка задачи (drawer), меню писем */
+/* Карточка задачи */
+.scrim{position:fixed;inset:0;z-index:20;background:rgba(10,20,15,.32);opacity:0;pointer-events:none;transition:opacity .18s}
+.scrim.open{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;right:0;bottom:0;z-index:21;width:min(760px,100%);background:var(--surface);box-shadow:var(--shadow);transform:translateX(102%);transition:transform .22s cubic-bezier(.2,.7,.2,1);display:flex;flex-direction:column}
+.drawer.open{transform:none}
+.drawer:not(.open){box-shadow:none;visibility:hidden;transition:transform .22s cubic-bezier(.2,.7,.2,1),visibility 0s .22s}
+.dh{padding:16px 22px 14px;border-bottom:1px solid var(--line)}
+.dh-top{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px}
+.dh-top .kid{font-weight:600;color:var(--ink)}
+.dh-top .sp{flex:1}
+.x{border:0;background:none;font-size:22px;line-height:1;cursor:pointer;color:var(--muted);padding:2px 6px;border-radius:var(--radius)}
+.x:hover{background:var(--sunk);color:var(--ink)}
+.title-in{width:100%;border:1px solid transparent;font-family:var(--font-d);font-size:21px;font-weight:600;letter-spacing:-.01em;padding:4px 6px;margin:6px -7px 0;background:none}
+.title-in:hover{border-color:var(--line)}
+.title-in:focus{border-color:var(--accent);background:var(--surface)}
+.db{flex:1;overflow:auto;padding:4px 22px 24px}
+.db section{padding:16px 0;border-bottom:1px solid var(--line-2)}
+.db section:last-child{border-bottom:0}
+.db h3{font-size:14px;margin:0 0 12px;display:flex;align-items:center;gap:10px}
+.db h3 small{font-weight:400;color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px 14px}
+.fld{display:flex;flex-direction:column;gap:4px;min-width:0}
+.fld>span{font-size:12.5px;color:var(--muted)}
+.fld small{color:var(--muted);font-size:12px}
+.fld.full{grid-column:1/-1}
+/* поле, которое текущему пользователю на этом этапе менять нельзя */
+.fld.fld-ro input,.fld.fld-ro select,.fld.fld-ro textarea{background:var(--sunk);border-color:var(--line-2);border-style:dashed;color:var(--muted);cursor:default;box-shadow:none}
+.title-in[readonly]{cursor:default}
+.title-in[readonly]:hover{border-color:transparent}
+.wait-hint{color:var(--muted);font-size:13px;flex:1 1 100%;order:-1}   /* своей строкой над кнопками */
+.fld.two{grid-column:span 2}
+.fld input,.fld select{width:100%}
+.hist{list-style:none;margin:0;padding:0;font-size:13px}
+.hist li{display:grid;grid-template-columns:130px 1fr;gap:10px;padding:5px 0;border-bottom:1px dashed var(--line-2)}
+.hist li:last-child{border-bottom:0}
+.hist .h{color:var(--muted);font-variant-numeric:tabular-nums}
+.df{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px 22px;border-top:1px solid var(--line);background:var(--sunk)}
+.df .sp{flex:1}
+.cards-list{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+/* Выгрузка карточек в BB (T-010): кнопка с причиной недоступности и список выгрузок */
+.bb-box{display:flex;flex-direction:column;gap:10px;margin-top:12px}
+.bb-box:empty{display:none}
+.bb-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.bb-row .btn{display:inline-flex;align-items:center;gap:8px}
+.bb-why{color:var(--muted);font-size:12.5px;flex:1 1 260px;min-width:0}
+.bb-h{font-size:12.5px;color:var(--muted);margin-bottom:2px}
+.bb-list a{color:var(--accent);text-underline-offset:2px}
+
+
+/* письмо: меню шаблонов регламента */
+.mailwrap{position:relative}
+.menu{position:absolute;bottom:calc(100% + 8px);right:0;width:340px;background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:6px;display:none;z-index:5}
+.menu.open{display:block;animation:menuIn .14s ease-out}
+@keyframes menuIn{from{opacity:0;transform:translateY(4px)}}
+.menu button{display:flex;flex-direction:column;align-items:flex-start;gap:1px;width:100%;text-align:left;border:0;background:none;padding:8px 10px;border-radius:9px;cursor:pointer;color:var(--ink)}
+.menu button:hover{background:var(--accent-2)}
+.menu b{font-weight:600;font-size:13.5px}
+.menu small{color:var(--muted);font-size:12px}
+.menu .rec{display:inline-block;margin-left:8px;padding:0 7px;border-radius:10px;background:var(--accent-2);color:var(--accent);font-size:11px;font-weight:600}
+
+
+/* Отправка карточки в базу знаний (T-011): блок в диалоге, бейдж «в БЗ» у карточки */
+.kb-send{border-top:1px dashed var(--line-2);padding-top:10px;display:flex;flex-direction:column;gap:8px}
+.kb-send>b{font-size:13px}
+.kb-pick{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end}
+.kb-pick .fld{margin:0}
+.kb-sent{font-size:12.5px;color:var(--muted)}
+.kb-badge{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--accent);background:var(--accent-2);border-radius:12px;padding:1px 8px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb-badge a{color:var(--accent);text-decoration:none;text-underline-offset:2px}
+.kb-badge a:hover{text-decoration:underline}
+.card-kb-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}

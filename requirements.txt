@@ -1,0 +1,7 @@
+# Зависимости реестра (решение пользователя — исключение из правила «только stdlib», см. CLAUDE.md).
+# Продакшн — DataLab Pro: пакеты ставятся в контейнер владельца (pip install --user -r requirements.txt
+# из внутреннего PyPI, либо папка vendor/ рядом с app.py и PYTHONPATH в start.sh).
+# Для REG_STORAGE=gp дополнительно нужен asyncpg (как и раньше).
+fastapi>=0.110
+uvicorn>=0.29
+jinja2>=3.1

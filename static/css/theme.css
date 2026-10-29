@@ -1,0 +1,92 @@
+/* theme.css — слой «Дизайн v3», экран входа, админ-панель, адаптив */
+/* ================= Дизайн v3 ================= */
+:root{
+  --bg:#F2F7F4; --surface:#FFFFFF; --sunk:#F5F9F6; --ink:#13211A; --muted:#5D6D65; --line:#D9E4DE; --line-2:#E8F0EB;
+  --accent:#1E8A4E; --accent-2:#E2F5E9; --accent-3:#C3EBD1;
+  --radius:9px; --r-lg:14px;
+  --shadow-sm:0 1px 2px rgba(16,40,28,.05),0 3px 10px rgba(16,40,28,.04);
+  --shadow:0 26px 64px rgba(16,40,28,.20),0 6px 16px rgba(16,40,28,.08);
+  --bot-bg:#F3F8F5; --user-bg:linear-gradient(135deg,#DDF5E6,#C8EFD6); --user-ink:#0F2E1C; --head-bg:linear-gradient(135deg,#E6F8EC,#F8FCF9 65%);
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0D1310; --surface:#151C18; --sunk:#111714; --ink:#E5EDE8; --muted:#97A59D; --line:#27322C; --line-2:#1E2823;
+  --accent:#4CC383; --accent-2:#173022; --accent-3:#1F4A31;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35); --shadow:0 26px 64px rgba(0,0,0,.6);
+  --bot-bg:#18211C; --user-bg:linear-gradient(135deg,#1E4A31,#1A3D29); --user-ink:#E5EDE8; --head-bg:linear-gradient(135deg,#173022,#151C18 65%);
+}}
+body{background:
+  radial-gradient(1000px 520px at 105% -12%, rgba(143,221,170,.24), transparent 62%),
+  radial-gradient(800px 460px at -12% 112%, rgba(143,221,170,.16), transparent 62%), var(--bg);
+  background-attachment:fixed}
+#app{grid-template-columns:228px 1fr;grid-template-rows:60px 1fr}
+.top{background:color-mix(in srgb,var(--surface) 80%,transparent);backdrop-filter:saturate(1.4) blur(12px);border-bottom:1px solid var(--line-2);padding:0 20px}
+.brand{gap:11px;font-weight:600}
+.brand .logo{width:30px;height:30px;flex:none;border-radius:50%;overflow:hidden;box-shadow:0 3px 10px rgba(46,154,92,.28)}
+.brand .logo svg,.ava svg{display:block;width:100%;height:100%}
+.tag{background:var(--surface)}
+.side{background:transparent;border-right:1px solid var(--line-2);padding:16px 12px;gap:3px}
+.side .sect{font-size:12px;color:var(--muted);padding:14px 11px 5px;opacity:.85}
+.side button{gap:11px;justify-content:flex-start;padding:9px 11px;border-radius:10px;font-weight:500;position:relative;transition:background .15s,color .15s}
+.side button .ico{width:18px;height:18px;flex:none;opacity:.7}
+.side button .lbl{flex:1}
+.side button:hover{background:color-mix(in srgb,var(--accent-2) 70%,transparent);color:var(--ink)}
+.side button.on{background:var(--surface);color:var(--accent);box-shadow:var(--shadow-sm);font-weight:600}
+.side button.on .ico{opacity:1}
+.side button.on::before{content:"";position:absolute;left:-12px;top:9px;bottom:9px;width:3px;border-radius:0 3px 3px 0;background:var(--accent)}
+.side .cnt{min-width:22px;text-align:center;padding:1px 7px;border-radius:20px;background:var(--line-2);color:var(--muted)}
+.side .cnt.bad{background:var(--bad-bg);color:var(--bad)}
+.side hr{display:none}
+main{padding:26px 30px 70px}
+h1{font-size:26px}
+.btn{border-radius:9px;padding:7px 14px;display:inline-flex;align-items:center;gap:7px;transition:background .15s,border-color .15s,box-shadow .15s,transform .1s}
+.btn:active{transform:translateY(1px)}
+.btn svg{width:16px;height:16px;flex:none}
+.btn.primary{background:linear-gradient(180deg,#27A35F,#1E8A4E);border-color:#1E8A4E;box-shadow:0 2px 8px rgba(30,138,78,.25)}
+input,select,textarea{border-radius:9px}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
+.tbl-wrap,.panel{border-radius:var(--r-lg);border-color:var(--line-2);box-shadow:var(--shadow-sm)}
+.seg{border-radius:9px}
+.col{border-radius:var(--r-lg);background:color-mix(in srgb,var(--surface) 55%,transparent)}
+.card{border-radius:10px;box-shadow:var(--shadow-sm)}
+.drawer{border-radius:18px 0 0 18px;overflow:hidden}
+.dh{background:var(--head-bg)}
+.chip{background:var(--surface)}
+
+
+/* вход по PIN (экран поверх реестра) и админ-панель */
+.me b{color:var(--ink);font-weight:600}
+.gate{position:fixed;inset:0;z-index:58;display:none;place-items:center;padding:16px;background:var(--bg)}
+.gate.open{display:grid}
+.gate form{width:min(400px,100%);background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r-lg);box-shadow:var(--shadow);padding:22px 24px;display:flex;flex-direction:column;gap:14px}
+.gate h1{display:flex;align-items:center;gap:10px;font-size:21px;margin:0}
+.gate h1 .logo{width:30px;height:30px;border-radius:50%;overflow:hidden;flex:none}
+.gate .fld input,.gate .fld select{width:100%}
+.gate-err{margin:0;color:var(--bad);background:var(--bad-bg);padding:8px 11px;border-radius:var(--radius);font-size:13px}
+.gate-err:empty{display:none}
+.adm-people table{min-width:1080px}
+.adm-people td{vertical-align:middle}
+.adm-people td:first-child{min-width:230px}
+.adm-people td:nth-child(2){min-width:180px}
+.adm-people select{width:100%}
+.adm-people td.adm-team{min-width:260px}
+.adm-people .pinc{white-space:nowrap;display:flex;gap:6px;align-items:center}
+.adm-people tr.off td{opacity:.6}
+.team-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;margin-top:12px}
+.team-box{border:1px solid var(--line-2);border-left:3px solid var(--c,var(--line));border-radius:var(--radius);padding:10px 12px;background:var(--sunk)}
+.team-box b{display:block;margin-bottom:6px}
+.team-box ul{margin:0;padding-left:18px;color:var(--muted);font-size:13px}
+.team-box .fld{margin-bottom:8px}
+.tm-pick{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:0 8px}
+.tm-pick select{width:100%;min-width:0}
+.tm-role{color:var(--ink);font-weight:600}
+.tm-foot{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:10px}
+
+@media (max-width:900px){
+  #app{grid-template-columns:1fr;grid-template-rows:auto auto 1fr}
+  .top{flex-wrap:wrap;padding:10px 14px;gap:8px}
+  .side{flex-direction:row;overflow:auto;border-right:0;border-bottom:1px solid var(--line);padding:6px}
+  .side hr,.credit{display:none}
+  .side button{white-space:nowrap;gap:8px}
+  main{padding:16px 14px 60px}
+  .grid{grid-template-columns:1fr 1fr}
+}

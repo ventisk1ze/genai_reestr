@@ -1,0 +1,12 @@
+# данные и локальные настройки — не в репозиторий
+data/
+registry.db
+registry.env
+*.log
+# Python и окружение
+__pycache__/
+*.pyc
+.venv/
+# Claude Code: личные настройки
+.claude/settings.local.json
+.DS_Store

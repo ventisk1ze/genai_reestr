@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Реестр задач ЦК</title>
+<link rel="stylesheet" href="/static/css/base.css">
+<link rel="stylesheet" href="/static/css/card.css">
+<link rel="stylesheet" href="/static/css/ai.css">
+<link rel="stylesheet" href="/static/css/theme.css">
+</head>
+<body>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <radialGradient id="lavaBg" cx="38%" cy="30%" r="80%"><stop offset="0" stop-color="#F3FDF6"/><stop offset=".55" stop-color="#C6F1D3"/><stop offset="1" stop-color="#8FDDAA"/></radialGradient>
+  <filter id="lavaGoo" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur in="SourceGraphic" stdDeviation="2.4"/><feColorMatrix values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -9"/></filter>
+  <clipPath id="lavaClip"><circle cx="32" cy="32" r="32"/></clipPath>
+</defs></svg>
+<div id="app">
+  <header class="top">
+    <div class="brand"><span class="logo" id="logo"></span><span id="ckname">Реестр задач</span></div>
+    <div class="top-meta" id="meta"></div>
+    <span class="sp"></span>
+    <span class="me" id="me"></span>
+    <button class="btn" data-act="sync" title="Перечитать реестр из хранилища">Обновить</button>
+  </header>
+  <nav class="side" id="nav"></nav>
+  <main id="main"></main>
+</div>
+<div class="scrim" id="scrim" data-act="close"></div>
+<aside class="drawer" id="drawer" aria-hidden="true"></aside>
+<button class="lava" id="lava" title="Помощник — нажмите, чтобы открыть; можно перетащить" aria-label="Открыть помощника"></button>
+<section class="ai" id="ai" aria-label="Помощник" aria-hidden="true">
+  <div class="ai-h" id="aiHead" title="Перетащите за шапку; двойной клик — вернуть на место"><span class="ava" id="aiAva"></span><div><b>Помощник</b></div><span class="sp"></span>
+    <button class="btn ghost sm" data-act="ai-qtoggle" id="aiQBtn" title="История запросов — клик подставит текст в поле ввода" aria-label="История запросов" aria-haspopup="true" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg></button><button class="btn ghost sm" data-act="ai-reset" title="Новый диалог" aria-label="Новый диалог"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button><button class="x" data-act="ai" aria-label="Свернуть">×</button><small class="ai-sel"><select id="aiSkill" class="ai-skill" title="Скилл ассистента — тот же, что в GigaCode"></select><select id="aiEngine" class="ai-skill" title="Кто отвечает: модель через API или агент GigaCode на сервере реестра"><option value="api">API</option><option value="gigacode">GigaCode</option></select></small></div>
+  <div class="ai-qlist" id="aiQList" role="menu" aria-label="История запросов"></div>
+  <div class="ai-m" id="aiMsgs"></div>
+  <div class="ai-f">
+    <div class="ai-files" id="aiFiles"></div>
+    <input type="file" id="aiFileIn" accept=".docx,.txt" multiple hidden>
+    <div class="ai-input"><button class="ai-clip" id="aiClip" data-act="ai-attach" title="Приложить файл: .docx или .txt, до 5 файлов к сообщению. Файл можно и перетащить в окно" aria-label="Приложить файл"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button><textarea id="aiIn" rows="1" placeholder="Опишите задачу своими словами — можно с типом: run, change, disrupt"></textarea><button class="send" id="aiSendBtn" data-act="ai-send" title="Отправить (Enter)" aria-label="Отправить"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg></button></div>
+    <div class="row"><button class="btn ghost sm" data-act="ai-take" id="aiTake" title="Подставить название и описание открытой задачи">Доработать постановку</button><span class="sp"></span><small>Enter — отправить, Shift+Enter — новая строка</small></div>
+  </div>
+</section>
+<div class="gate" id="gate" aria-hidden="true"></div>
+<dialog id="dlg"></dialog>
+<div class="toasts" id="toasts"></div>
+<div class="busy" id="busy"><div><span class="spin"></span><span id="busyText"></span></div></div>
+<datalist id="dl-people"></datalist>
+
+
+<script>
+'use strict';
+/* Ключ API страницы: выдаётся сервером вместе с HTML. Маркер ниже — место для bootstrap.js (если есть). */
+window.TOKEN = '{{ token }}';
+/*__BOOTSTRAP__*/
+</script>
+<script type="module" src="/static/js/main.js"></script>
+</body>
+</html>
