@@ -1,7 +1,7 @@
 """T-012: база знаний — одна, в настройках владельца; узлы онтологии; отправка карточки через PR (прямой git+REST).
 
 Каркас — test_t010 (BBBase: сервер реестра + прокси сотрудника + REST-фейк Bitbucket). БЗ — локальный
-bare-репозиторий, засеянный ontology.yml; адрес — в REG_KB_REPO_URL у владельца (локальный путь — git
+bare-репозиторий с папками-узлами (онтология = структура папок, T-014); адрес — в REG_KB_REPO_URL
 без учётки). Постоянный клон — REG_KB_CLONE у сотрудника: переиспользуется между отправками, при сбое
 push/PR — переклонируется. Все данные выдуманные; учётка BB — только в памяти прокси.
 """
@@ -27,19 +27,18 @@ KB_TASK, KB_UPLOAD, KB_DONE = "/api/kb/task", "/api/kb/upload", "/api/kb/done"
 KB_PROJECT, KB_REPO = "kbproj", "kb-cards"
 KB_URL = None   # адрес БЗ — путь к локальному bare (назначается в setUpClass)
 KB_PARTS = f"{KB_PROJECT}/{KB_REPO}"   # проект/репозиторий для REST-фейка
-ONTOLOGY_YML = ("Онтология базы знаний:\n"
-                "    Общие вопросы:\n"
-                "    Аудит моделей:\n"
-                "        Метрики качества:\n")
-ONTOLOGY_NODES = [{"name": "Онтология базы знаний", "path": "Онтология базы знаний",
-                   "children": [{"name": "Общие вопросы", "path": "Онтология базы знаний/Общие вопросы",
-                                 "children": []},
-                                {"name": "Аудит моделей", "path": "Онтология базы знаний/Аудит моделей",
-                                 "children": [{"name": "Метрики качества",
-                                               "path": "Онтология базы знаний/Аудит моделей/Метрики качества",
-                                               "children": []}]}]}]
+# Онтология — папки репозитория (T-014): сид кладёт файлы в папки, дерево — из их структуры
+ONTOLOGY_FILES = {"Общие вопросы/.gitkeep": "",
+                  "Аудит моделей/Метрики качества/.gitkeep": "",
+                  "Служебная (папки с файлами)/readme.md": "# Папка с необычными символами\n"}
+ONTOLOGY_NODES = [{"name": "Аудит моделей", "path": "Аудит моделей",
+                   "children": [{"name": "Метрики качества", "path": "Аудит моделей/Метрики качества",
+                                 "children": []}]},
+                  {"name": "Общие вопросы", "path": "Общие вопросы", "children": []},
+                  {"name": "Служебная (папки с файлами)", "path": "Служебная (папки с файлами)",
+                   "children": []}]
 HIST_KB = "Карточка отправлена в базу знаний"
-NODE = "Онтология базы знаний/Общие вопросы"
+NODE = "Общие вопросы"
 
 
 def seed_bare(path, files, env, branch="master"):
@@ -52,7 +51,9 @@ def seed_bare(path, files, env, branch="master"):
     subprocess.run(["git", "symbolic-ref", "HEAD", f"refs/heads/{branch}"], cwd=seed, check=True,
                    env={**os.environ, **env}, capture_output=True)
     for name, text in files.items():
-        (seed / name).write_text(text, "utf-8")
+        f = seed / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text, "utf-8")
     subprocess.run(["git", "add", "-A"], cwd=seed, check=True, env={**os.environ, **env}, capture_output=True)
     subprocess.run(["git", "commit", "--quiet", "-m", "Начало выдуманной БЗ"], cwd=seed, check=True,
                    env={**os.environ, **env}, capture_output=True)
@@ -93,7 +94,7 @@ class KbRepo:
 class KbBase(BBBase):
     """Тот же каркас, что T-010, плюс: БЗ у владельца (REG_KB_REPO_URL) и постоянный клон у сотрудника."""
 
-    ontology = ONTOLOGY_YML
+    ontology = ONTOLOGY_FILES
 
     @classmethod
     def server_env(cls):
@@ -108,7 +109,7 @@ class KbBase(BBBase):
     def setUpClass(cls):
         super().setUpClass()   # сервер (REG_KB_REPO_URL из server_env), прокси, REST-фейк BBBase
         cls.kb_repo_path = cls.work / KB_PROJECT / f"{KB_REPO}.git"   # проект/репо — из пути (repo_url_parts)
-        files = {"ontology.yml": cls.ontology} if cls.ontology else {"README.md": "# Выдуманная БЗ без онтологии\n"}
+        files = cls.ontology if cls.ontology else {"README.md": "# Выдуманная БЗ без папок\n"}
         seed_bare(cls.kb_repo_path, files, cls.bare.env)
         cls.rest.repos[KB_PARTS] = cls.kb_repo_path   # PR для БЗ — в её bare
         cls.clone = Path(cls.work) / "kb-clone"
@@ -147,6 +148,8 @@ class KbFlowTest(KbBase):
         code, r = self.proxy.call("GET", KB_ONTOLOGY, session=self.sid[EXE])
         self.assertEqual(code, 200, r)
         self.assertEqual(r.get("nodes"), ONTOLOGY_NODES, r)
+        names = [n["path"] for n in r.get("nodes") or []]
+        self.assertNotIn(".git", names, "скрытые папки — не узлы")
         self.no_secrets(self.proxy.responses[-1], KB_ONTOLOGY)
 
     def test_send_card_creates_clone_and_pr(self):
@@ -260,16 +263,28 @@ class KbFlowTest(KbBase):
                                                    "node": "../вверх"}, session=self.sid[EXE])
         self.assertEqual(c, 400, r)
 
+    def test_send_node_not_in_tree_rejected(self):
+        """Кр. 2: узел — корректный путь, но папки в БЗ нет — 400 «нет в базе знаний», в git не ходили."""
+        self.wipe_clone()
+        t, cards = self.task_in(status=APPROVED)
+        m = self.rest.mark()
+        c, r = self.proxy.call("POST", KB_UPLOAD, {"kind": t["kind"], "id": t["id"], "path": cards[0]["path"],
+                                                   "node": "Несуществующая папка"}, session=self.sid[EXE])
+        self.assertEqual(c, 400, r)
+        self.assertIn("нет в базе знаний", r.get("error", ""))
+        self.assertEqual(self.rest.since(m), [], "pull request не создавался")
+
 
 class KbNoOntologyTest(KbBase):
-    """БЗ без ontology.yml — понятная 400 с именем файла."""
+    """БЗ без папок — понятная 400 с подсказкой создать их (git не хранит пустые папки)."""
 
-    ontology = ""   # без онтологии: сид — один README
+    ontology = ""   # без папок: сид — один README в корне
 
     def test_ontology_missing(self):
         code, r = self.proxy.call("GET", KB_ONTOLOGY, session=self.sid[EXE])
         self.assertEqual(code, 400, r)
-        self.assertIn("ontology.yml", r.get("error", ""))
+        self.assertIn("нет папок", r.get("error", ""))
+        self.assertIn(".gitkeep", r.get("error", ""), "нет подсказки про пустые папки в git")
 
 
 class ServerSideTest(KbBase):
@@ -302,13 +317,13 @@ class ServerSideTest(KbBase):
         # не исполнитель
         code, r = self.s.call("GET", f"{KB_TASK}?{q}", session=self.sid[LEAD])
         self.assertEqual(code, 403, r)
-        # плохой узел: путь наверх и слишком глубоко
-        for node in ("../вверх", "а/б/в/г/д/е/ж/з/и"):
+        # плохой узел: путь наверх и скрытая папка (глубина не ограничена — T-014)
+        for node in ("../вверх", ".hidden/папка"):
             b = q.replace("node=" + urllib.request.quote(NODE), "node=" + urllib.request.quote(node))
             code, r = self.s.call("GET", f"{KB_TASK}?{b}", session=self.sid[EXE])
             self.assertEqual(code, 400, (node, r))
-        # кириллица и вложенность в узле — разрешены (каждый узел онтологии — папка)
-        deep = "Онтология базы знаний/Аудит моделей/Метрики качества"
+        # кириллица и вложенность в узле — разрешены (узлы — реальные папки)
+        deep = "Аудит моделей/Метрики качества"
         b = q.replace("node=" + urllib.request.quote(NODE), "node=" + urllib.request.quote(deep))
         code, r = self.s.call("GET", f"{KB_TASK}?{b}", session=self.sid[EXE])
         self.assertEqual(code, 200, (deep, r))
@@ -439,7 +454,7 @@ class EvilServerKbTest(unittest.TestCase):
         cls.reg_port = cls.httpd.socket.getsockname()[1]
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
         cls.kb_repo_path = cls.work / KB_PROJECT / f"{KB_REPO}.git"
-        seed_bare(cls.kb_repo_path, {"ontology.yml": ONTOLOGY_YML}, {})
+        seed_bare(cls.kb_repo_path, ONTOLOGY_FILES, {})
         cls.proxy = Proxy(f"127.0.0.1:{cls.reg_port}", cls.work, cls.token,
                           env={"REG_BB_BASE_URL": "http://127.0.0.1:1", "REG_BB_TIMEOUT": "30",
                                "REG_KB_CLONE": str(cls.work / "kb-clone"), **git_env(cls.work)})

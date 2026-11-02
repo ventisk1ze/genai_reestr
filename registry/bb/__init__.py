@@ -40,8 +40,14 @@ def bb_dir_ok(d):
 
 
 def kb_node_ok(path):
-    """Путь узла онтологии (каждый узел — папка): валидные сегменты и предел глубины."""
-    return bb_dir_ok(path) and path.count("/") + 1 <= config.KB_NODE_DEPTH_MAX
+    """Путь узла онтологии — папка в репозитории БЗ (T-014): относительный путь, сегменты не с точки,
+    без «..» и управляющих символов; имя папки — любые Unicode-символы (реальные имена). Без лимита глубины."""
+    if not isinstance(path, str) or not path or len(path) > 500:
+        return False
+    for s in path.split("/"):
+        if not s or s.startswith(".") or s != s.strip() or ".." in s:
+            return False
+    return not re.search(r"[\\\x00-\x1f\x7f]", path)
 
 
 def bb_branch_ok(b):

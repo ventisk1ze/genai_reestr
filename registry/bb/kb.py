@@ -16,7 +16,7 @@ from registry import config, creds
 from registry.bb import kb_node_ok
 from registry.bb.direct import (BbFail, BbNothing, bb_message, ensure_clone, git, kb_file_url,
                                 no_changes, refresh_clone, repo_url_parts, rest_create_pr, url_ok_for_creds)
-from registry.bb.ontology import ontology_from_clone
+from registry.bb.ontology import tree_from_clone
 from registry.bb.upload import BB_LOCK, bb_local_problem, bb_server_call, bb_write_cards
 from registry.errors import BadRequest
 
@@ -45,15 +45,13 @@ def _ontology_checked(nodes):
             if not isinstance(name, str) or not name.strip() or len(name) > 200:
                 raise bad("у узла нет имени")
             if not kb_node_ok(path):
-                raise bad(f"путь узла «{str(path)[:80]}» — не папки (буквы, цифры, пробелы, дефисы)")
+                raise bad(f"путь узла «{str(path)[:80]}» — не путь папки в репозитории")
             if path in seen:
                 raise bad(f"путь «{path}» повторяется")
             seen.add(path)
             kids = it.get("children") or []
             if not isinstance(kids, list):
                 raise bad(f"у узла «{name}» children — не список")
-            if kids and depth + 1 >= config.KB_NODE_DEPTH_MAX:
-                raise bad(f"глубже {config.KB_NODE_DEPTH_MAX} уровней")
             out.append({"name": name.strip(), "path": path,
                         "children": walk(kids, depth + 1) if kids else []})
         return out
@@ -121,7 +119,7 @@ def kb_proxy_ontology(server, headers):
     try:
         clone = ensure_clone(got["url"], config.KB_CLONE)
         refresh_clone(clone, got["branch"])
-        return 200, _ontology_checked(ontology_from_clone(clone, got["branch"]))
+        return 200, _ontology_checked(tree_from_clone(clone))
     except BadRequest as e:
         return 400, {"error": str(e)}
     except BbFail as e:
@@ -153,11 +151,24 @@ def kb_check_reply(d, kind, tid, path, node):
     return {"title": card["title"], "body": card["body"], "branch": tg["branch"], "url": tg["repo_url"]}
 
 
+def _node_in_tree(nodes, path):
+    """Узел есть в дереве папок клона (рекурсивно)."""
+    for n in nodes:
+        if n["path"] == path:
+            return True
+        if _node_in_tree(n["children"], path):
+            return True
+    return False
+
+
 def _kb_push_card(card, branch, node, full, file, pr_branch):
-    """Одна попытка отправки: свежая база (fetch) → ветка → файл в папку узла → commit → push → PR (REST)."""
+    """Одна попытка отправки: свежая база (fetch) → узел есть в дереве → ветка → файл в папку узла →
+    commit → push → PR (REST)."""
     clone = ensure_clone(card["url"], config.KB_CLONE)
     rp = str(clone)
     refresh_clone(clone, branch)
+    if not _node_in_tree(tree_from_clone(clone), node):
+        raise BadRequest("Такого узла онтологии нет в базе знаний — обновите страницу и выберите из списка")
     git(["checkout", "--quiet", "-b", pr_branch], cwd=rp, step="новая ветка")
     bb_write_cards(rp, node, [{"file": file, "title": card["title"], "body": card["body"]}])
     git(["add", "--", full], cwd=rp, step="add")
@@ -215,6 +226,8 @@ def kb_proxy_upload(server, headers, raw):
             try:
                 sent = _kb_push_card(card, card["branch"], node, full, file, pr_branch)
                 break
+            except BadRequest as e:
+                return 400, {"error": str(e)}
             except BbNothing:
                 return 400, {"error": "В базе знаний эта карточка уже лежит без изменений — отправлять нечего",
                              "step": "status"}

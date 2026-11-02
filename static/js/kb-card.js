@@ -49,7 +49,7 @@ export async function cardDialog(path){
     <div class="kb-send">
       <b>Отправить в базу знаний</b>
       ${sent ? `<div class="kb-sent">Отправлена: ${kbBadge(entry)}</div>` : ''}
-      <label class="fld"><span>Узел онтологии (папка в базе знаний)</span>
+      <label class="fld"><span>Узел онтологии (папка в репозитории БЗ)</span>
         <select id="kbNode"><option value="">— загрузка онтологии… —</option></select></label>
     </div>
     <div class="dlg-f">

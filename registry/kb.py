@@ -47,8 +47,7 @@ def kb_target():
 def kb_node_checked(node):
     """Узел онтологии — путь папок (каждый узел — папка); проверка и понятная ошибка."""
     if not kb_node_ok(node):
-        raise BadRequest(f"Узел онтологии — путь папок (буквы, цифры, пробелы, дефисы), "
-                         f"до {config.KB_NODE_DEPTH_MAX} уровней")
+        raise BadRequest("Узел онтологии — путь папки в репозитории БЗ (выберите его из списка)")
     return node
 
 

@@ -160,7 +160,6 @@ BB_CLONE = os.path.expanduser(os.environ.get("REG_BB_CLONE", "~/bb").strip() or 
 KB_REPO_URL = os.environ.get("REG_KB_REPO_URL", "").strip()   # адрес клонирования единственной БЗ
 KB_BRANCH = os.environ.get("REG_KB_BRANCH", "master").strip() or "master"
 KB_CLONE = os.path.expanduser(os.environ.get("REG_KB_CLONE", "~/kb").strip() or "~/kb")
-KB_NODE_DEPTH_MAX = int(os.environ.get("REG_KB_NODE_DEPTH_MAX", "8"))    # глубина узла онтологии (папок)
 
 # --local: принимать запросы только с localhost (защита от DNS-rebinding: злая страница в браузере
 # резолвит свой домен на 127.0.0.1 и читает страницу с токеном). Отключается REG_LOCAL_HOST_CHECK=0 —
